@@ -9,6 +9,8 @@ description = "A lightweight Eurobot 2026 strategy POC simulator."
 requires-python = ">=3.10"
 dependencies = [
   "matplotlib>=3.7",
+  "numpy>=1.26",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

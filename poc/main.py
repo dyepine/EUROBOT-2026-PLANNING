@@ -16,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dt", type=float, default=0.5)
     parser.add_argument("--output", type=Path, default=Path("runs") / "latest_match.json")
     parser.add_argument("--batch", type=int, default=1, help="Run the scenario multiple times with incrementing seeds.")
+    parser.add_argument("--planner-backend", default="grid", choices=["grid", "legacy"])
     return parser
 
 
@@ -23,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    planner = UtilityPlanner()
+    planner = UtilityPlanner(use_grid_navigation=args.planner_backend == "grid")
     results = []
     for seed_offset in range(args.batch):
         scenario = build_scenario(args.scenario, seed=args.seed + seed_offset)

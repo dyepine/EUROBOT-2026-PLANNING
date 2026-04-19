@@ -45,6 +45,7 @@ class ThermometerState(str, Enum):
 class SourcePoint:
     semantic_id: int
     position: Vec2
+    map_obstacle_id: str | None = None
     collect_routes: tuple[RouteOption, ...] = ()
     state: SourceState = SourceState.UNTOUCHED
     available_items: int = 2
@@ -67,6 +68,7 @@ class DepositPoint:
     position: Vec2
     kind: DepositType
     owner: Side | None
+    map_obstacle_id: str | None = None
     deposit_routes: tuple[RouteOption, ...] = ()
     approach_ring_radius: float = 0.0
     approach_ring_samples: int = 16

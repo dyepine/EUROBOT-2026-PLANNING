@@ -17,6 +17,8 @@ poc/
   external_events.py
   game_state.py
   geometry.py
+  grid_map.py
+  grid_planner.py
   main.py
   metrics.py
   opponent_policy.py
@@ -34,12 +36,18 @@ docs/
 
 ## Быстрый старт
 
-Требуется `python3` и `matplotlib`.
+Требуется `python3`, `matplotlib`, `numpy`, `PyYAML`.
 
 Запуск одного матча:
 
 ```bash
 python3 -m poc.main --scenario baseline --output runs/baseline.json
+```
+
+Явно запустить старый геометрический backend вместо grid A*:
+
+```bash
+python3 -m poc.main --scenario baseline --planner-backend legacy --output runs/baseline_legacy.json
 ```
 
 Сценарий с отложенным появлением источников:
@@ -63,6 +71,8 @@ python3 -m poc.main --scenario aggressive_enemy --batch 5
 ## Что уже есть в каркасе
 
 - Семантическая карта поля с источниками, кладовыми, гнёздами и термометром.
+- Pure Python occupancy-grid карта на основе `map_layout.yaml` из боевого репозитория.
+- 8-направленный A* planner без ROS с динамическим включением/выключением кучек и кладовых на карте.
 - Endgame-конфиг, совместимый с текущим `ChillSequence`.
 - Константная модель таймингов по типу действия.
 - Fixed-timestep симулятор.

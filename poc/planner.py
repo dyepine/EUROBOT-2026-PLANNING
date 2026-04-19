@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import pairwise
+from pathlib import Path
 
 from poc.actions import Action, ActionType
 from poc.endgame import can_finish_scoring_action, estimate_endgame_duration
 from poc.entities import DepositPoint, DepositType, RouteOption, Side, SourceState, SourcePoint, Thermometer, ThermometerState
 from poc.game_state import GameState
 from poc.geometry import distance, path_length, point_to_segment_distance
+from poc.grid_map import DEFAULT_LAYOUT_PATH, GridOccupancyMap
+from poc.grid_planner import GridAStarPlanner
 from poc.scoring import ActionTimingConfig, UtilityWeights, evaluate_action, travel_time
 
 
@@ -27,14 +30,31 @@ class PlanningDecision:
         }
 
 
+@dataclass(slots=True)
+class PlannedRoute:
+    route_name: str
+    semantic_waypoints: tuple[tuple[float, float], ...]
+    motion_waypoints: tuple[tuple[float, float], ...]
+    travel_duration: float
+    duration_source: str
+
+
 class UtilityPlanner:
     def __init__(
         self,
         timing: ActionTimingConfig | None = None,
         weights: UtilityWeights | None = None,
+        use_grid_navigation: bool = True,
+        layout_path: str | None = None,
     ) -> None:
         self.timing = timing or ActionTimingConfig()
         self.weights = weights or UtilityWeights()
+        self.grid_map: GridOccupancyMap | None = None
+        self.grid_planner: GridAStarPlanner | None = None
+        resolved_layout = DEFAULT_LAYOUT_PATH if layout_path is None else Path(layout_path)
+        if use_grid_navigation and resolved_layout.exists():
+            self.grid_map = GridOccupancyMap.from_layout(resolved_layout, team_color="all")
+            self.grid_planner = GridAStarPlanner(self.grid_map)
 
     def plan(self, state: GameState, side: Side) -> PlanningDecision:
         ranked = self.rank_actions(state, side)
@@ -68,7 +88,7 @@ class UtilityPlanner:
             for source in state.sources.values():
                 if not source.is_available(state.t):
                     continue
-                action = self._make_pick_action(state, robot.position, robot.speed, source)
+                action = self._make_pick_action(state, side, robot.position, robot.speed, source)
                 if action is None:
                     continue
                 if self._can_fit_before_endgame(state, side, action):
@@ -88,7 +108,7 @@ class UtilityPlanner:
             not state.thermometer.is_done_for_side(side)
             and self._thermometer_lane_is_clear(state, side)
         ):
-            thermo = self._make_thermometer_action(state, robot.position, robot.speed, state.thermometer, side)
+            thermo = self._make_thermometer_action(state, side, robot.position, robot.speed, state.thermometer)
             if self._can_fit_before_endgame(state, side, thermo):
                 candidates.append(thermo)
 
@@ -131,39 +151,36 @@ class UtilityPlanner:
     def _make_pick_action(
         self,
         state: GameState,
+        side: Side,
         start: tuple[float, float],
         speed: float,
         source: SourcePoint,
     ) -> Action | None:
-        route = self._best_route(
+        planned_route = self._best_route(
             state,
+            side,
             start,
             speed,
             source.collection_routes(),
-            ignored_source_ids={source.semantic_id},
         )
-        if route is None:
+        if planned_route is None:
             return None
-        travel = self._travel_time_for_waypoints(
-            state,
-            start,
-            speed,
-            route.waypoints,
-            ignored_source_ids={source.semantic_id},
-        )
+        travel = planned_route.travel_duration
         service = self.timing.pick_duration + self.timing.align_duration
         return Action(
             type=ActionType.PICK,
             target_id=source.semantic_id,
             label=f"PICK_{source.semantic_id}",
-            target_position=route.waypoints[-1],
-            waypoints=route.waypoints,
+            target_position=planned_route.motion_waypoints[-1],
+            waypoints=planned_route.motion_waypoints,
             service_duration=service,
             travel_duration=travel,
             expected_duration=travel + service,
+            duration_source=planned_route.duration_source,
             metadata={
                 "semantic_position": source.position,
-                "route_name": route.name,
+                "route_name": planned_route.route_name,
+                "semantic_waypoints": planned_route.semantic_waypoints,
             },
         )
 
@@ -175,23 +192,25 @@ class UtilityPlanner:
         speed: float,
         deposit: DepositPoint,
     ) -> Action | None:
-        route = self._best_route(state, start, speed, deposit.deposit_route_candidates())
-        if route is None:
+        planned_route = self._best_route(state, side, start, speed, deposit.deposit_route_candidates())
+        if planned_route is None:
             return None
-        travel = self._travel_time_for_waypoints(state, start, speed, route.waypoints)
+        travel = planned_route.travel_duration
         service = self.timing.deposit_duration
         return Action(
             type=ActionType.DEPOSIT,
             target_id=deposit.semantic_id,
             label=f"DEPOSIT_{deposit.semantic_id}",
-            target_position=route.waypoints[-1],
-            waypoints=route.waypoints,
+            target_position=planned_route.motion_waypoints[-1],
+            waypoints=planned_route.motion_waypoints,
             service_duration=service,
             travel_duration=travel,
             expected_duration=travel + service,
+            duration_source=planned_route.duration_source,
             metadata={
                 "semantic_position": deposit.position,
-                "route_name": route.name,
+                "route_name": planned_route.route_name,
+                "semantic_waypoints": planned_route.semantic_waypoints,
                 "deposit_owner": side.value,
             },
         )
@@ -204,52 +223,84 @@ class UtilityPlanner:
         speed: float,
         deposit: DepositPoint,
     ) -> Action | None:
-        route = self._best_route(state, start, speed, deposit.attack_route_candidates(side))
-        if route is None:
+        planned_route = self._best_route(
+            state,
+            side,
+            start,
+            speed,
+            deposit.attack_route_candidates(side),
+            allow_final_goal_occupied=True,
+        )
+        if planned_route is None:
             return None
-        travel = self._travel_time_for_waypoints(state, start, speed, route.waypoints)
+        travel = planned_route.travel_duration
         # Deposit destruction resolves immediately on arrival at the zone center.
         service = 0.0
         return Action(
             type=ActionType.ATTACK_DEPOSIT,
             target_id=deposit.semantic_id,
             label=f"ATTACK_{deposit.semantic_id}",
-            target_position=route.waypoints[-1],
-            waypoints=route.waypoints,
+            target_position=planned_route.motion_waypoints[-1],
+            waypoints=planned_route.motion_waypoints,
             service_duration=service,
             travel_duration=travel,
             expected_duration=travel + service,
+            duration_source=planned_route.duration_source,
             metadata={
                 "semantic_position": deposit.position,
-                "route_name": route.name,
-                "axis": route.axis or "free",
+                "route_name": planned_route.route_name,
+                "semantic_waypoints": planned_route.semantic_waypoints,
+                "axis": next(
+                    (
+                        route.axis
+                        for route in deposit.attack_route_candidates(side)
+                        if route.name == planned_route.route_name
+                    ),
+                    "free",
+                ) or "free",
             },
         )
 
     def _make_thermometer_action(
         self,
         state: GameState,
+        side: Side,
         start: tuple[float, float],
         speed: float,
         thermometer: Thermometer,
-        side: Side,
     ) -> Action:
         route = thermometer.route_for_side(side)
-        travel = self._travel_time_for_waypoints(state, start, speed, route)
+        planned_motion = self._plan_motion(
+            state,
+            side,
+            start,
+            speed,
+            route,
+        )
+        if planned_motion is None:
+            planned_motion = PlannedRoute(
+                route_name="thermometer_route",
+                semantic_waypoints=route,
+                motion_waypoints=route,
+                travel_duration=self._travel_time_for_waypoints(state, start, speed, route),
+                duration_source="distance_model+constants",
+            )
         service = self.timing.thermometer_duration
         return Action(
             type=ActionType.DO_THERMOMETER,
             target_id=thermometer.semantic_id,
             label="THERMOMETER",
-            target_position=route[-1],
-            waypoints=route,
+            target_position=planned_motion.motion_waypoints[-1],
+            waypoints=planned_motion.motion_waypoints,
             service_duration=service,
-            travel_duration=travel,
-            expected_duration=travel + service,
+            travel_duration=planned_motion.travel_duration,
+            expected_duration=planned_motion.travel_duration + service,
+            duration_source=planned_motion.duration_source,
             metadata={
                 "drag_start": route[1],
                 "drag_end": route[2],
                 "blocking_source_id": thermometer.blocking_source_id_for_side(side),
+                "semantic_waypoints": route,
             },
         )
 
@@ -295,24 +346,29 @@ class UtilityPlanner:
     def _best_route(
         self,
         state: GameState,
+        side: Side,
         start: tuple[float, float],
         speed: float,
         routes: tuple[RouteOption, ...],
-        ignored_source_ids: set[int] | None = None,
-    ) -> RouteOption | None:
+        allow_final_goal_occupied: bool = False,
+    ) -> PlannedRoute | None:
         viable_routes = [route for route in routes if self._route_is_available(state, route)]
-        if not viable_routes:
-            return None
-        return min(
-            viable_routes,
-            key=lambda route: self._travel_time_for_waypoints(
+        best: PlannedRoute | None = None
+        for route in viable_routes:
+            planned_route = self._plan_motion(
                 state,
+                side,
                 start,
                 speed,
                 route.waypoints,
-                ignored_source_ids=ignored_source_ids,
-            ),
-        )
+                route_name=route.name,
+                allow_final_goal_occupied=allow_final_goal_occupied,
+            )
+            if planned_route is None:
+                continue
+            if best is None or planned_route.travel_duration < best.travel_duration:
+                best = planned_route
+        return best
 
     def _route_is_available(self, state: GameState, route: RouteOption) -> bool:
         for source_id in route.blocked_by_sources:
@@ -344,6 +400,52 @@ class UtilityPlanner:
             total_distance / speed
             + self.timing.move_overhead * len(waypoints)
             + obstacle_hits * self.timing.obstacle_detour_penalty
+        )
+
+    def _plan_motion(
+        self,
+        state: GameState,
+        side: Side,
+        start: tuple[float, float],
+        speed: float,
+        semantic_waypoints: tuple[tuple[float, float], ...],
+        route_name: str = "default",
+        allow_final_goal_occupied: bool = False,
+    ) -> PlannedRoute | None:
+        if self.grid_planner is not None and self.grid_map is not None:
+            self._sync_grid_navigation(state, side)
+            planned_path = self.grid_planner.plan_through_waypoints(
+                start,
+                semantic_waypoints,
+                allow_final_goal_occupied=allow_final_goal_occupied,
+            )
+            if not planned_path.success:
+                return None
+            travel_duration = planned_path.distance_m / speed + self.timing.move_overhead * len(semantic_waypoints)
+            return PlannedRoute(
+                route_name=route_name,
+                semantic_waypoints=semantic_waypoints,
+                motion_waypoints=planned_path.waypoints,
+                travel_duration=travel_duration,
+                duration_source=planned_path.duration_source,
+            )
+
+        travel_duration = self._travel_time_for_waypoints(state, start, speed, semantic_waypoints)
+        return PlannedRoute(
+            route_name=route_name,
+            semantic_waypoints=semantic_waypoints,
+            motion_waypoints=semantic_waypoints,
+            travel_duration=travel_duration,
+            duration_source="distance_model+constants",
+        )
+
+    def _sync_grid_navigation(self, state: GameState, side: Side) -> None:
+        assert self.grid_map is not None
+        self.grid_map.sync_semantic_state(state.sources, state.deposits)
+        enemy_robot = state.robot_for_side(side.opponent())
+        self.grid_map.set_dynamic_circle_points(
+            [enemy_robot.position],
+            radius_m=self.timing.robot_separation_radius,
         )
 
     def _thermometer_lane_is_clear(self, state: GameState, side: Side) -> bool:

@@ -41,19 +41,37 @@ def _mirrored_routes(routes: tuple[RouteOption, ...], suffix: str = "_mirror") -
 
 def build_default_semantic_map() -> SemanticMap:
     source_14_route = _route("collect_14", (0.35, 0.15), (0.35, 0.06))
+    source_14_back_route = _route(
+        "collect_14_back",
+        (0.35, -0.55),
+        (0.35, -0.46),
+        blocked_by_sources=(13,),
+    )
     source_13_route = _route("collect_13", (0.40, -0.50), (0.40, -0.56))
     source_12_route = _route("collect_12", (0.99, -0.60), (1.06, -0.60))
     source_11_route = _route("collect_11", (1.00, 0.20), (1.06, 0.20))
 
     sources = {
-        11: SourcePoint(11, (1.325, 0.2), collect_routes=(source_11_route,), label="blue_source_upper"),
-        12: SourcePoint(12, (1.325, -0.6), collect_routes=(source_12_route,), label="blue_source_lower"),
-        13: SourcePoint(13, (0.4, -0.825), collect_routes=(source_13_route,), label="blue_source_mid_lower"),
-        14: SourcePoint(14, (0.35, -0.2), collect_routes=(source_14_route,), label="blue_source_mid_upper"),
-        21: SourcePoint(21, (-1.325, 0.2), collect_routes=(_mirror_route(source_11_route),), label="yellow_source_upper"),
-        22: SourcePoint(22, (-1.325, -0.6), collect_routes=(_mirror_route(source_12_route),), label="yellow_source_lower"),
-        23: SourcePoint(23, (-0.4, -0.825), collect_routes=(_mirror_route(source_13_route),), label="yellow_source_mid_lower"),
-        24: SourcePoint(24, (-0.35, -0.2), collect_routes=(_mirror_route(source_14_route),), label="yellow_source_mid_upper"),
+        11: SourcePoint(11, (1.325, 0.2), map_obstacle_id="11", collect_routes=(source_11_route,), label="blue_source_upper"),
+        12: SourcePoint(12, (1.325, -0.6), map_obstacle_id="12", collect_routes=(source_12_route,), label="blue_source_lower"),
+        13: SourcePoint(13, (0.4, -0.825), map_obstacle_id="13", collect_routes=(source_13_route,), label="blue_source_mid_lower"),
+        14: SourcePoint(
+            14,
+            (0.35, -0.2),
+            map_obstacle_id="14",
+            collect_routes=(source_14_route, source_14_back_route),
+            label="blue_source_mid_upper",
+        ),
+        21: SourcePoint(21, (-1.325, 0.2), map_obstacle_id="21", collect_routes=(_mirror_route(source_11_route),), label="yellow_source_upper"),
+        22: SourcePoint(22, (-1.325, -0.6), map_obstacle_id="22", collect_routes=(_mirror_route(source_12_route),), label="yellow_source_lower"),
+        23: SourcePoint(23, (-0.4, -0.825), map_obstacle_id="23", collect_routes=(_mirror_route(source_13_route),), label="yellow_source_mid_lower"),
+        24: SourcePoint(
+            24,
+            (-0.35, -0.2),
+            map_obstacle_id="24",
+            collect_routes=_mirrored_routes((source_14_route, source_14_back_route)),
+            label="yellow_source_mid_upper",
+        ),
     }
 
     deposit_17_center = (0.70, -0.20)
@@ -110,6 +128,7 @@ def build_default_semantic_map() -> SemanticMap:
             (0.0, -0.2),
             DepositType.STORAGE,
             None,
+            map_obstacle_id="00",
             deposit_routes=(_route("drop_01", (0.0, -0.2)),),
             approach_ring_radius=center_storage_upper_attack_radius,
             label="center_storage_upper",
@@ -119,6 +138,7 @@ def build_default_semantic_map() -> SemanticMap:
             deposit_10_center,
             DepositType.STORAGE,
             None,
+            map_obstacle_id="10",
             deposit_routes=(_route("drop_10", deposit_10_center),),
             attack_routes_by_side=deposit_10_attack_routes,
             label="center_storage_lower",
@@ -128,6 +148,7 @@ def build_default_semantic_map() -> SemanticMap:
             deposit_15_center,
             DepositType.STORAGE,
             None,
+            map_obstacle_id="15",
             deposit_routes=(_route("drop_15", (1.13, -0.20)),),
             attack_routes_by_side=deposit_15_attack_routes,
             label="right_corner_storage",
@@ -137,6 +158,7 @@ def build_default_semantic_map() -> SemanticMap:
             (0.80, -0.90),
             DepositType.STORAGE,
             Side.BLUE,
+            map_obstacle_id="16",
             deposit_routes=(_route("drop_16", (0.80, -0.65)),),
             protected_for=Side.BLUE,
             label="blue_storage_lower",
@@ -146,6 +168,7 @@ def build_default_semantic_map() -> SemanticMap:
             deposit_17_center,
             DepositType.STORAGE,
             None,
+            map_obstacle_id="17",
             approach_ring_radius=hypot(
                 deposit_17_bt_pose[0] - deposit_17_center[0],
                 deposit_17_bt_pose[1] - deposit_17_center[1],
@@ -157,6 +180,7 @@ def build_default_semantic_map() -> SemanticMap:
             deposit_25_center,
             DepositType.STORAGE,
             None,
+            map_obstacle_id="25",
             deposit_routes=(_route("drop_25", (-1.13, -0.20)),),
             attack_routes_by_side=deposit_25_attack_routes,
             label="left_corner_storage",
@@ -166,6 +190,7 @@ def build_default_semantic_map() -> SemanticMap:
             (-0.80, -0.90),
             DepositType.STORAGE,
             Side.YELLOW,
+            map_obstacle_id="26",
             deposit_routes=(_route("drop_26", (-0.80, -0.65)),),
             protected_for=Side.YELLOW,
             label="yellow_storage_lower",
@@ -175,6 +200,7 @@ def build_default_semantic_map() -> SemanticMap:
             deposit_27_center,
             DepositType.STORAGE,
             None,
+            map_obstacle_id="27",
             approach_ring_radius=hypot(
                 deposit_27_bt_pose[0] - deposit_27_center[0],
                 deposit_27_bt_pose[1] - deposit_27_center[1],
