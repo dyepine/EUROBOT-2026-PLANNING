@@ -151,20 +151,21 @@ class DepositPoint:
 class Thermometer:
     semantic_id: int
     position: Vec2
+    approach_point: Vec2 = (0.0, -0.77)
     reward: int = 10
     state: ThermometerState = ThermometerState.NOT_DONE
     label: str = "thermometer"
     blue_route: tuple[Vec2, ...] = (
-        (0.0, -0.90),
-        (0.0, -1.00),
-        (0.63, -1.00),
-        (0.63, -0.88),
+        (0.0, -0.70),
+        (0.0, -0.77),
+        (0.63, -0.77),
+        (0.63, -0.65),
     )
     yellow_route: tuple[Vec2, ...] = (
-        (0.0, -0.90),
-        (0.0, -1.00),
-        (-0.63, -1.00),
-        (-0.63, -0.88),
+        (0.0, -0.70),
+        (0.0, -0.77),
+        (-0.63, -0.77),
+        (-0.63, -0.65),
     )
     blue_blocking_source_id: int = 13
     yellow_blocking_source_id: int = 23
@@ -193,6 +194,26 @@ class Thermometer:
 
     def route_for_side(self, side: Side) -> tuple[Vec2, ...]:
         return self.blue_route if side is Side.BLUE else self.yellow_route
+
+    def drag_route_for_side(self, side: Side) -> tuple[Vec2, ...]:
+        route = self.route_for_side(side)
+        if len(route) >= 4:
+            return route[1:4]
+        if len(route) >= 2:
+            return route[1:]
+        return route
+
+    def drag_start_for_side(self, side: Side) -> Vec2:
+        drag_route = self.drag_route_for_side(side)
+        if drag_route:
+            return drag_route[0]
+        return self.position
+
+    def drag_end_for_side(self, side: Side) -> Vec2:
+        drag_route = self.drag_route_for_side(side)
+        if drag_route:
+            return drag_route[-1]
+        return self.position
 
     def blocking_source_id_for_side(self, side: Side) -> int:
         return self.blue_blocking_source_id if side is Side.BLUE else self.yellow_blocking_source_id

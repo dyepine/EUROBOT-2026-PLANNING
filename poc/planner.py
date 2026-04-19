@@ -270,6 +270,7 @@ class UtilityPlanner:
         thermometer: Thermometer,
     ) -> Action:
         route = thermometer.route_for_side(side)
+        drag_route = thermometer.drag_route_for_side(side)
         planned_motion = self._plan_motion(
             state,
             side,
@@ -297,8 +298,9 @@ class UtilityPlanner:
             expected_duration=planned_motion.travel_duration + service,
             duration_source=planned_motion.duration_source,
             metadata={
-                "drag_start": route[1],
-                "drag_end": route[2],
+                "drag_start": drag_route[0] if drag_route else route[0],
+                "drag_end": drag_route[-1] if drag_route else route[-1],
+                "drag_waypoints": drag_route,
                 "blocking_source_id": thermometer.blocking_source_id_for_side(side),
                 "semantic_waypoints": route,
             },

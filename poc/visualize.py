@@ -1,22 +1,57 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from dataclasses import fields, is_dataclass
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib import animation
 from matplotlib.patches import Circle
+
+from poc.grid_map import DEFAULT_LAYOUT_PATH, GridOccupancyMap
+from poc.scoring import ActionTimingConfig
+
+
+def save_animation_media(
+    anim_obj: animation.FuncAnimation,
+    output_path: str | Path,
+    fps: int = 12,
+) -> Path:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+
+    if suffix == ".html":
+        path.write_text(anim_obj.to_jshtml(), encoding="utf-8")
+        return path
+    if suffix == ".gif":
+        anim_obj.save(str(path), writer="pillow", fps=fps)
+        return path
+    if suffix == ".mp4":
+        _save_animation_mp4(anim_obj, path, fps=fps)
+        return path
+    raise ValueError(f"Unsupported animation format: {suffix}")
 
 
 def plot_match_overview(
     result: Any,
     figsize: tuple[int, int] = (14, 8),
     field_ylim: tuple[float, float] = (-1.0, 1.0),
+    show_grid_map: bool = True,
+    grid_alpha: float = 0.35,
 ):
     data = _result_to_dict(result)
     fig, ax_field, ax_score, ax_actions = _build_overview_figure(figsize)
 
-    _plot_field(ax_field, data, field_ylim=field_ylim)
+    _plot_field(
+        ax_field,
+        data,
+        field_ylim=field_ylim,
+        show_grid_map=show_grid_map,
+        grid_alpha=grid_alpha,
+    )
     _plot_score(ax_score, data)
     _plot_action_timeline(ax_actions, data)
     fig.tight_layout()
@@ -29,20 +64,30 @@ def animate_match_overview(
     field_ylim: tuple[float, float] = (-1.0, 1.0),
     interval: int = 120,
     frame_stride: int = 2,
+    show_grid_map: bool = True,
+    grid_alpha: float = 0.35,
 ):
     data = _result_to_dict(result)
     fig, ax_field, ax_score, ax_actions = _build_overview_figure(figsize)
 
-    _plot_field_background(ax_field, data, field_ylim=field_ylim)
+    history = data["history"]
+    initial_history = history[0] if history else None
+    initial_state = _materialize_field_state(data, initial_history)
+    grid_overlay = _plot_field_background(
+        ax_field,
+        data,
+        field_ylim=field_ylim,
+        grid_state=initial_state if show_grid_map else None,
+        enemy_position=tuple(initial_history["enemy_position"]) if initial_history and show_grid_map else None,
+        grid_alpha=grid_alpha,
+    )
     _plot_score_background(ax_score, data)
     _plot_action_timeline(ax_actions, data)
 
-    history = data["history"]
     frame_indices = list(range(0, len(history), max(frame_stride, 1)))
     if not frame_indices or frame_indices[-1] != len(history) - 1:
         frame_indices.append(len(history) - 1)
 
-    initial_state = _materialize_field_state(data, history[0] if history else None)
     field_artists = _init_field_state_artists(ax_field, initial_state)
 
     our_line, = ax_field.plot([], [], color="#118ab2", linewidth=2, label="our robot")
@@ -72,6 +117,13 @@ def animate_match_overview(
         current = current_history[-1]
 
         current_state = _materialize_field_state(data, current)
+        if grid_overlay is not None:
+            _update_grid_map_overlay(
+                grid_overlay,
+                current_state,
+                tuple(current["enemy_position"]),
+                alpha=grid_alpha,
+            )
         _update_field_state_artists(field_artists, current_state)
 
         our_traj = [point["our_position"] for point in current_history]
@@ -93,6 +145,7 @@ def animate_match_overview(
         time_text.set_text(f"t = {current_time:.1f}s")
 
         return (
+            *((grid_overlay,) if grid_overlay is not None else ()),
             our_line,
             enemy_line,
             our_marker,
@@ -114,6 +167,72 @@ def animate_match_overview(
     )
 
 
+def _save_animation_mp4(
+    anim_obj: animation.FuncAnimation,
+    output_path: Path,
+    fps: int = 12,
+) -> None:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("MP4 export requires opencv-python (cv2).") from exc
+
+    figure = anim_obj._fig
+    writer = None
+    codecs = ("mp4v", "avc1", "H264")
+
+    try:
+        anim_obj._init_draw()
+        for frame_data in anim_obj.new_saved_frame_seq():
+            anim_obj._draw_next_frame(frame_data, blit=False)
+            figure.canvas.draw()
+            width, height = figure.canvas.get_width_height()
+            rgb = _canvas_to_rgb_array(figure.canvas, width=width, height=height)
+            bgr = rgb[:, :, ::-1]
+
+            if writer is None:
+                for codec in codecs:
+                    candidate = cv2.VideoWriter(
+                        str(output_path),
+                        cv2.VideoWriter_fourcc(*codec),
+                        float(fps),
+                        (width, height),
+                    )
+                    if candidate.isOpened():
+                        writer = candidate
+                        break
+                    candidate.release()
+                if writer is None:
+                    raise RuntimeError(
+                        "Failed to open MP4 writer via OpenCV. Tried codecs: "
+                        + ", ".join(codecs)
+                    )
+
+            writer.write(bgr)
+    finally:
+        if writer is not None:
+            writer.release()
+
+
+def _canvas_to_rgb_array(canvas, width: int, height: int) -> np.ndarray:
+    if hasattr(canvas, "buffer_rgba"):
+        rgba = np.asarray(canvas.buffer_rgba())
+        return np.ascontiguousarray(rgba[:, :, :3])
+
+    if hasattr(canvas, "tostring_rgb"):
+        rgb = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8)
+        return rgb.reshape((height, width, 3))
+
+    renderer = getattr(canvas, "renderer", None)
+    if renderer is not None and hasattr(renderer, "buffer_rgba"):
+        rgba = np.asarray(renderer.buffer_rgba())
+        return np.ascontiguousarray(rgba[:, :, :3])
+
+    raise RuntimeError(
+        "Matplotlib canvas does not expose a compatible pixel buffer for MP4 export."
+    )
+
+
 def _build_overview_figure(figsize: tuple[int, int]):
     fig = plt.figure(figsize=figsize)
     grid = fig.add_gridspec(2, 2, height_ratios=[2.0, 1.0])
@@ -123,9 +242,23 @@ def _build_overview_figure(figsize: tuple[int, int]):
     return fig, ax_field, ax_score, ax_actions
 
 
-def _plot_field(ax, data: dict[str, Any], field_ylim: tuple[float, float]) -> None:
-    _plot_field_background(ax, data, field_ylim=field_ylim)
-    final_state = _materialize_field_state(data, data["history"][-1] if data["history"] else None)
+def _plot_field(
+    ax,
+    data: dict[str, Any],
+    field_ylim: tuple[float, float],
+    show_grid_map: bool = True,
+    grid_alpha: float = 0.35,
+) -> None:
+    final_history = data["history"][-1] if data["history"] else None
+    final_state = _materialize_field_state(data, final_history)
+    _plot_field_background(
+        ax,
+        data,
+        field_ylim=field_ylim,
+        grid_state=final_state if show_grid_map else None,
+        enemy_position=tuple(final_history["enemy_position"]) if final_history and show_grid_map else None,
+        grid_alpha=grid_alpha,
+    )
     _init_field_state_artists(ax, final_state)
 
     our_traj = [entry["our_position"] for entry in data["history"]]
@@ -135,7 +268,14 @@ def _plot_field(ax, data: dict[str, Any], field_ylim: tuple[float, float]) -> No
     ax.legend(loc="upper center", ncol=3)
 
 
-def _plot_field_background(ax, data: dict[str, Any], field_ylim: tuple[float, float]) -> None:
+def _plot_field_background(
+    ax,
+    data: dict[str, Any],
+    field_ylim: tuple[float, float],
+    grid_state: dict[str, Any] | None = None,
+    enemy_position: tuple[float, float] | None = None,
+    grid_alpha: float = 0.35,
+):
     width, _height = data["field_size"]
     ax.set_title("Field and Robot Trajectories")
     ax.set_xlim(-width / 2, width / 2)
@@ -152,6 +292,15 @@ def _plot_field_background(ax, data: dict[str, Any], field_ylim: tuple[float, fl
         )
     )
 
+    overlay_artist = None
+    if grid_state is not None:
+        overlay_artist = _add_grid_map_overlay(
+            ax,
+            grid_state,
+            enemy_position=enemy_position,
+            alpha=grid_alpha,
+        )
+
     _draw_route_guides(ax, data)
 
     endgame = data["endgame"][data["our_side"]]
@@ -159,6 +308,101 @@ def _plot_field_background(ax, data: dict[str, Any], field_ylim: tuple[float, fl
     ax.scatter(chill_x, chill_y, s=150, marker="P", color="#8338ec", label="our chill point", zorder=3)
     home_points = endgame["home_waypoints"]
     ax.plot([p[0] for p in home_points], [p[1] for p in home_points], "--", color="#8338ec", alpha=0.9, zorder=1)
+    return overlay_artist
+
+
+@lru_cache(maxsize=1)
+def _grid_map_template() -> GridOccupancyMap | None:
+    if not DEFAULT_LAYOUT_PATH.exists():
+        return None
+    return GridOccupancyMap.from_layout(DEFAULT_LAYOUT_PATH, team_color="all")
+
+
+def _add_grid_map_overlay(
+    ax,
+    field_state: dict[str, Any],
+    enemy_position: tuple[float, float] | None,
+    alpha: float,
+):
+    rgba, extent = _grid_overlay_rgba(field_state, enemy_position=enemy_position, alpha=alpha)
+    if rgba is None:
+        return None
+    return ax.imshow(
+        rgba,
+        extent=extent,
+        origin="lower",
+        interpolation="nearest",
+        zorder=0.4,
+    )
+
+
+def _update_grid_map_overlay(
+    overlay_artist,
+    field_state: dict[str, Any],
+    enemy_position: tuple[float, float] | None,
+    alpha: float,
+) -> None:
+    rgba, extent = _grid_overlay_rgba(field_state, enemy_position=enemy_position, alpha=alpha)
+    if rgba is None:
+        return
+    overlay_artist.set_data(rgba)
+    overlay_artist.set_extent(extent)
+
+
+def _grid_overlay_rgba(
+    field_state: dict[str, Any],
+    enemy_position: tuple[float, float] | None,
+    alpha: float,
+) -> tuple[np.ndarray | None, tuple[float, float, float, float] | None]:
+    template = _grid_map_template()
+    if template is None:
+        return None, None
+
+    overlay_map = template.clone()
+    overlay_map.active_start_ids = {
+        str(source.get("map_obstacle_id") or key)
+        for key, source in field_state["sources"].items()
+        if int(source.get("available_items", 0)) > 0
+        and source.get("state") != "empty"
+        and str(source.get("map_obstacle_id") or key) in overlay_map.dynamic_start_ids
+    }
+    overlay_map.active_match_ids = {
+        str(deposit.get("map_obstacle_id") or key)
+        for key, deposit in field_state["deposits"].items()
+        if (int(deposit.get("blue_items", 0)) + int(deposit.get("yellow_items", 0))) > 0
+        and str(deposit.get("map_obstacle_id") or key) in overlay_map.match_obstacles
+    }
+    if enemy_position is not None:
+        overlay_map.dynamic_circles = [
+            (
+                enemy_position[0],
+                enemy_position[1],
+                ActionTimingConfig().robot_separation_radius,
+            )
+        ]
+    else:
+        overlay_map.dynamic_circles = []
+    overlay_map.rebuild()
+
+    planning_map = overlay_map.planning_map
+    if planning_map is None:
+        return None, None
+
+    occupied = planning_map > 0
+    rgba = np.zeros((*planning_map.shape, 4), dtype=float)
+    rgba[..., 0] = 0.10
+    rgba[..., 1] = 0.13
+    rgba[..., 2] = 0.16
+    rgba[..., 3] = occupied.astype(float) * alpha
+
+    origin_x, origin_y = overlay_map.config.origin_xy
+    extent = (
+        origin_x,
+        origin_x + overlay_map.width_px * overlay_map.config.resolution_m,
+        origin_y,
+        origin_y + overlay_map.height_px * overlay_map.config.resolution_m,
+    )
+    return rgba, extent
 
 
 def _draw_route_guides(ax, data: dict[str, Any]) -> None:
@@ -170,7 +414,8 @@ def _draw_route_guides(ax, data: dict[str, Any]) -> None:
     for deposit in data["deposits"].values():
         position = tuple(deposit["position"])
         ring_radius = float(deposit.get("approach_ring_radius", 0.0) or 0.0)
-        if ring_radius > 0.0:
+        uses_ring_for_deposit = ring_radius > 0.0 and not deposit.get("deposit_routes")
+        if uses_ring_for_deposit:
             ax.add_patch(
                 Circle(
                     position,
@@ -185,6 +430,40 @@ def _draw_route_guides(ax, data: dict[str, Any]) -> None:
             )
         for route in deposit.get("deposit_routes", []):
             _draw_single_route_guide(ax, position, route["waypoints"], color="#ced4da")
+
+    thermometer = data["thermometer"]
+    thermometer_position = tuple(thermometer["position"])
+    approach_point = _thermometer_approach_point(thermometer)
+    ax.plot(
+        [approach_point[0], thermometer_position[0]],
+        [approach_point[1], thermometer_position[1]],
+        linestyle=":",
+        linewidth=1.1,
+        color="#6a4c93",
+        alpha=0.45,
+        zorder=1,
+    )
+    ax.scatter(
+        [approach_point[0]],
+        [approach_point[1]],
+        s=32,
+        marker="x",
+        color="#6a4c93",
+        alpha=0.6,
+        zorder=2,
+    )
+    for side, color in (("blue", "#118ab2"), ("yellow", "#ef476f")):
+        slide_start = tuple(thermometer_position)
+        slide_end = _thermometer_slide_target_for_side(thermometer, side)
+        ax.plot(
+            [slide_start[0], slide_end[0]],
+            [slide_start[1], slide_end[1]],
+            linestyle="--",
+            linewidth=1.2,
+            color=color,
+            alpha=0.2,
+            zorder=1,
+        )
 
 
 def _draw_single_route_guide(ax, anchor: tuple[float, float], waypoints: Any, color: str) -> None:
@@ -211,6 +490,8 @@ def _init_field_state_artists(ax, field_state: dict[str, Any]) -> dict[str, Any]
         "deposit_markers": {},
         "deposit_labels": {},
         "deposit_states": {},
+        "thermometer_markers": {},
+        "thermometer_traces": {},
     }
 
     for key, source in field_state["sources"].items():
@@ -233,9 +514,42 @@ def _init_field_state_artists(ax, field_state: dict[str, Any]) -> dict[str, Any]
         artists["deposit_states"][key] = state_label
 
     tx, ty = field_state["thermometer"]["position"]
-    thermometer_marker, = ax.plot([], [], marker="*", markersize=14, linestyle="None", zorder=2)
-    thermometer_marker.set_data([tx], [ty])
-    artists["thermometer_marker"] = thermometer_marker
+    approach_x, approach_y = field_state["thermometer"]["approach_point"]
+    thermometer_base, = ax.plot(
+        [],
+        [],
+        marker="o",
+        markersize=9,
+        linestyle="None",
+        markerfacecolor="none",
+        markeredgecolor="#6a4c93",
+        markeredgewidth=1.4,
+        alpha=0.9,
+        zorder=2,
+    )
+    thermometer_base.set_data([tx], [ty])
+    thermometer_approach, = ax.plot(
+        [],
+        [],
+        marker="x",
+        markersize=8,
+        linestyle="None",
+        color="#6a4c93",
+        alpha=0.8,
+        zorder=2,
+    )
+    thermometer_approach.set_data([approach_x], [approach_y])
+    artists["thermometer_base"] = thermometer_base
+    artists["thermometer_approach"] = thermometer_approach
+
+    for side, color, marker_style in (
+        ("blue", "#118ab2", "*"),
+        ("yellow", "#ef476f", "P"),
+    ):
+        thermometer_trace, = ax.plot([], [], linewidth=2.4, alpha=0.65, color=color, zorder=2)
+        thermometer_marker, = ax.plot([], [], marker=marker_style, markersize=13, linestyle="None", color=color, zorder=3)
+        artists["thermometer_traces"][side] = thermometer_trace
+        artists["thermometer_markers"][side] = thermometer_marker
 
     _update_field_state_artists(artists, field_state)
     return artists
@@ -267,7 +581,37 @@ def _update_field_state_artists(artists: dict[str, Any], field_state: dict[str, 
         marker.set_markersize(10 + total_items)
         state_label.set_text(_deposit_state_text(deposit))
 
-    artists["thermometer_marker"].set_color(_thermometer_color(field_state["thermometer"]["state"]))
+    thermometer = field_state["thermometer"]
+    base_position = tuple(thermometer["position"])
+    approach_point = tuple(thermometer.get("approach_point", _thermometer_approach_point(thermometer)))
+
+    artists["thermometer_base"].set_data([base_position[0]], [base_position[1]])
+    artists["thermometer_approach"].set_data([approach_point[0]], [approach_point[1]])
+
+    for side, marker in artists["thermometer_markers"].items():
+        trace = artists["thermometer_traces"][side]
+        side_state = thermometer.get("sides", {}).get(side, {})
+        visual_position = tuple(side_state.get("visual_position", base_position))
+        is_animating = bool(side_state.get("is_animating", False))
+        is_done = bool(side_state.get("is_done", False))
+        color = _thermometer_side_color(side)
+
+        marker.set_data([visual_position[0]], [visual_position[1]])
+        marker.set_color(color)
+        marker.set_alpha(0.95 if is_animating or is_done else 0.35)
+        marker.set_markersize(16 if is_animating else (14 if is_done else 11))
+
+        if _point_distance(base_position, visual_position) > 1e-6:
+            trace.set_data(
+                [base_position[0], visual_position[0]],
+                [base_position[1], visual_position[1]],
+            )
+            trace.set_color(color)
+            trace.set_alpha(0.7 if is_animating else 0.45)
+            trace.set_visible(True)
+        else:
+            trace.set_data([], [])
+            trace.set_visible(False)
 
 
 def _materialize_field_state(data: dict[str, Any], history_entry: dict[str, Any] | None) -> dict[str, Any]:
@@ -292,6 +636,8 @@ def _materialize_field_state(data: dict[str, Any], history_entry: dict[str, Any]
 
         if "thermometer_state" in history_entry:
             thermometer["state"] = history_entry["thermometer_state"]
+
+    thermometer.update(_thermometer_visual_payload(data, thermometer, current_time))
 
     return {
         "sources": sources,
@@ -458,6 +804,182 @@ def _thermometer_color(state: str) -> str:
     if state == "done_both":
         return "#2a9d8f"
     return "#6a4c93"
+
+
+def _thermometer_side_color(side: str) -> str:
+    return "#118ab2" if side == "blue" else "#ef476f"
+
+
+def _thermometer_visual_payload(
+    data: dict[str, Any],
+    thermometer: dict[str, Any],
+    current_time: float,
+) -> dict[str, Any]:
+    approach_point = _thermometer_approach_point(thermometer)
+    active_entries = _active_thermometer_actions(data.get("action_log", []), current_time)
+    sides_payload: dict[str, dict[str, Any]] = {}
+
+    for side in ("blue", "yellow"):
+        active_entry = active_entries.get(side)
+        is_done = _thermometer_side_is_done(str(thermometer.get("state", "not_done")), side)
+        visual_position = _thermometer_final_position_for_side(thermometer, side) if is_done else tuple(thermometer["position"])
+        is_animating = False
+
+        if active_entry is not None:
+            visual_position = _thermometer_position_during_action(
+                thermometer,
+                side,
+                elapsed=max(0.0, current_time - float(active_entry["time"])),
+                total_duration=float(active_entry["expected_duration"]),
+            )
+            is_animating = True
+
+        sides_payload[side] = {
+            "visual_position": visual_position,
+            "is_animating": is_animating,
+            "is_done": is_done,
+        }
+
+    return {
+        "approach_point": approach_point,
+        "sides": sides_payload,
+    }
+
+
+def _active_thermometer_actions(
+    action_log: list[dict[str, Any]],
+    current_time: float,
+) -> dict[str, dict[str, Any]]:
+    active_entries = [
+        entry
+        for entry in action_log
+        if entry.get("action") == "THERMOMETER"
+        and float(entry.get("time", 0.0)) <= current_time < float(entry.get("time", 0.0)) + float(entry.get("expected_duration", 0.0))
+    ]
+    grouped: dict[str, dict[str, Any]] = {}
+    for entry in active_entries:
+        side = str(entry.get("side"))
+        previous = grouped.get(side)
+        if previous is None or float(entry.get("time", 0.0)) > float(previous.get("time", 0.0)):
+            grouped[side] = entry
+    return grouped
+
+
+def _thermometer_approach_point(thermometer: dict[str, Any]) -> tuple[float, float]:
+    point = thermometer.get("approach_point")
+    if point is None:
+        return (0.0, -0.77)
+    return tuple(point)
+
+
+def _thermometer_route_for_side(
+    thermometer: dict[str, Any],
+    side: str,
+) -> tuple[tuple[float, float], ...]:
+    route = thermometer.get(f"{side}_route")
+    if route:
+        return tuple(tuple(point) for point in route)
+
+    direction = 1.0 if side == "blue" else -1.0
+    return (
+        (0.0, -0.70),
+        (0.0, -0.77),
+        (0.63 * direction, -0.77),
+        (0.63 * direction, -0.65),
+        (0.80 * direction, -0.65),
+    )
+
+
+def _thermometer_drag_route_for_side(
+    thermometer: dict[str, Any],
+    side: str,
+) -> tuple[tuple[float, float], ...]:
+    route = _thermometer_route_for_side(thermometer, side)
+    if len(route) >= 4:
+        return route[1:4]
+    if len(route) >= 2:
+        return route[1:]
+    return route
+
+
+def _thermometer_slide_target_for_side(
+    thermometer: dict[str, Any],
+    side: str,
+) -> tuple[float, float]:
+    route = _thermometer_route_for_side(thermometer, side)
+    base_position = tuple(thermometer["position"])
+    if len(route) >= 3:
+        return (route[2][0], base_position[1])
+    if route:
+        return (route[-1][0], base_position[1])
+    return base_position
+
+
+def _thermometer_side_is_done(state: str, side: str) -> bool:
+    if side == "blue":
+        return state in ("done_blue", "done_both")
+    return state in ("done_yellow", "done_both")
+
+
+def _thermometer_final_position_for_side(
+    thermometer: dict[str, Any],
+    side: str,
+) -> tuple[float, float]:
+    return _thermometer_slide_target_for_side(thermometer, side)
+
+
+def _thermometer_position_during_action(
+    thermometer: dict[str, Any],
+    side: str,
+    elapsed: float,
+    total_duration: float,
+) -> tuple[float, float]:
+    route = _thermometer_route_for_side(thermometer, side)
+    base_position = tuple(thermometer["position"])
+    slide_target = _thermometer_slide_target_for_side(thermometer, side)
+    if len(route) < 3:
+        return tuple(thermometer["position"])
+
+    timing = ActionTimingConfig()
+    travel_duration = max(0.0, total_duration - timing.thermometer_duration)
+    if travel_duration <= 1e-9:
+        return slide_target
+
+    path_distances = [_point_distance(a, b) for a, b in zip(route[:-1], route[1:])]
+    total_path_distance = sum(path_distances)
+    if total_path_distance <= 1e-9:
+        return slide_target
+
+    pre_slide_distance = path_distances[0] if path_distances else 0.0
+    slide_distance = _point_distance(route[1], route[2])
+    if slide_distance <= 1e-9:
+        return slide_target
+
+    travelled = total_path_distance * min(max(elapsed, 0.0), travel_duration) / travel_duration
+    if travelled <= pre_slide_distance:
+        return base_position
+    if travelled >= pre_slide_distance + slide_distance:
+        return slide_target
+
+    progress = (travelled - pre_slide_distance) / slide_distance
+    current_x = base_position[0] + (slide_target[0] - base_position[0]) * progress
+    return (current_x, base_position[1])
+
+
+def _point_distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return float(np.hypot(b[0] - a[0], b[1] - a[1]))
+
+
+def _interpolate_point(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    progress: float,
+) -> tuple[float, float]:
+    clamped = min(max(progress, 0.0), 1.0)
+    return (
+        start[0] + (end[0] - start[0]) * clamped,
+        start[1] + (end[1] - start[1]) * clamped,
+    )
 
 
 def _format_semantic_id(semantic_id: int) -> str:

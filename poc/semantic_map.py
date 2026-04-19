@@ -77,8 +77,22 @@ def build_default_semantic_map() -> SemanticMap:
     deposit_17_center = (0.70, -0.20)
     deposit_17_bt_pose = (0.70, 0.04)
     deposit_27_center = (-0.70, -0.20)
-    deposit_27_bt_pose = (-0.69, 0.00)
-    center_storage_upper_attack_radius = 0.20
+    upper_storage_ring_radius = hypot(
+        deposit_17_bt_pose[0] - deposit_17_center[0],
+        deposit_17_bt_pose[1] - deposit_17_center[1],
+    )
+    center_storage_attack_routes = {
+        Side.BLUE: (RouteOption(name="attack_01_center", waypoints=((0.0, -0.2),)),),
+        Side.YELLOW: (RouteOption(name="attack_01_center", waypoints=((0.0, -0.2),)),),
+    }
+    deposit_17_attack_routes = {
+        Side.BLUE: (RouteOption(name="attack_17_center", waypoints=(deposit_17_center,)),),
+        Side.YELLOW: (RouteOption(name="attack_17_center", waypoints=(deposit_17_center,)),),
+    }
+    deposit_27_attack_routes = {
+        Side.BLUE: (RouteOption(name="attack_27_center", waypoints=(deposit_27_center,)),),
+        Side.YELLOW: (RouteOption(name="attack_27_center", waypoints=(deposit_27_center,)),),
+    }
     deposit_10_center = (0.0, -0.90)
     deposit_15_center = (1.40, -0.20)
     deposit_25_center = (-1.40, -0.20)
@@ -129,8 +143,8 @@ def build_default_semantic_map() -> SemanticMap:
             DepositType.STORAGE,
             None,
             map_obstacle_id="00",
-            deposit_routes=(_route("drop_01", (0.0, -0.2)),),
-            approach_ring_radius=center_storage_upper_attack_radius,
+            approach_ring_radius=upper_storage_ring_radius,
+            attack_routes_by_side=center_storage_attack_routes,
             label="center_storage_upper",
         ),
         10: DepositPoint(
@@ -169,10 +183,8 @@ def build_default_semantic_map() -> SemanticMap:
             DepositType.STORAGE,
             None,
             map_obstacle_id="17",
-            approach_ring_radius=hypot(
-                deposit_17_bt_pose[0] - deposit_17_center[0],
-                deposit_17_bt_pose[1] - deposit_17_center[1],
-            ),
+            approach_ring_radius=upper_storage_ring_radius,
+            attack_routes_by_side=deposit_17_attack_routes,
             label="right_upper_storage",
         ),
         25: DepositPoint(
@@ -201,10 +213,8 @@ def build_default_semantic_map() -> SemanticMap:
             DepositType.STORAGE,
             None,
             map_obstacle_id="27",
-            approach_ring_radius=hypot(
-                deposit_27_bt_pose[0] - deposit_27_center[0],
-                deposit_27_bt_pose[1] - deposit_27_center[1],
-            ),
+            approach_ring_radius=upper_storage_ring_radius,
+            attack_routes_by_side=deposit_27_attack_routes,
             label="left_upper_storage",
         ),
         101: DepositPoint(
@@ -227,7 +237,11 @@ def build_default_semantic_map() -> SemanticMap:
         ),
     }
 
-    thermometer = Thermometer(900, (0.0, -1.0))
+    thermometer = Thermometer(
+        900,
+        (0.0, -1.0),
+        approach_point=(0.0, -0.77),
+    )
     return SemanticMap(
         name="default_semantic_field",
         field_size=(FIELD_WIDTH, FIELD_HEIGHT),
