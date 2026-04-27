@@ -21,6 +21,7 @@ class RouteOption:
     waypoints: tuple[Vec2, ...]
     blocked_by_sources: tuple[int, ...] = ()
     axis: str | None = None
+    release_target_footprint_after_waypoint: int | None = None
 
 
 class SourceState(str, Enum):
@@ -32,6 +33,14 @@ class SourceState(str, Enum):
 class DepositType(str, Enum):
     HOME = "home"
     STORAGE = "storage"
+
+
+class PushState(str, Enum):
+    CLEAR = "clear"
+    PUSHED_LEFT = "pushed_left"
+    PUSHED_RIGHT = "pushed_right"
+    PUSHED_UP = "pushed_up"
+    PUSHED_DOWN = "pushed_down"
 
 
 class ThermometerState(str, Enum):
@@ -46,10 +55,12 @@ class SourcePoint:
     semantic_id: int
     position: Vec2
     map_obstacle_id: str | None = None
+    map_footprint_enabled: bool = True
     collect_routes: tuple[RouteOption, ...] = ()
     state: SourceState = SourceState.UNTOUCHED
-    available_items: int = 2
+    available_items: int = 4
     available_from_t: float = 0.0
+    footprint_enabled: bool = True
     released_by: str | None = None
     label: str = ""
 
@@ -69,6 +80,7 @@ class DepositPoint:
     kind: DepositType
     owner: Side | None
     map_obstacle_id: str | None = None
+    map_footprint_enabled: bool = True
     deposit_routes: tuple[RouteOption, ...] = ()
     approach_ring_radius: float = 0.0
     approach_ring_samples: int = 16
@@ -76,6 +88,10 @@ class DepositPoint:
     protected_for: Side | None = None
     blue_items: int = 0
     yellow_items: int = 0
+    footprint_enabled: bool = True
+    push_state: PushState = PushState.CLEAR
+    pushed_owner: Side | None = None
+    occupied_by: Side | None = None
     was_occupied: bool = False
     label: str = ""
 
@@ -88,23 +104,45 @@ class DepositPoint:
     def add_items(self, side: Side, count: int) -> None:
         if count > 0:
             self.was_occupied = True
+            self.map_footprint_enabled = True
         if side is Side.BLUE:
             self.blue_items += count
         else:
             self.yellow_items += count
+        self._refresh_occupancy()
 
     def remove_items(self, side: Side, count: int) -> int:
         if side is Side.BLUE:
             removed = min(self.blue_items, count)
             self.blue_items -= removed
+            self._refresh_occupancy()
             return removed
         removed = min(self.yellow_items, count)
         self.yellow_items -= removed
+        self._refresh_occupancy()
         return removed
 
     def clear(self) -> None:
         self.blue_items = 0
         self.yellow_items = 0
+        self.map_footprint_enabled = False
+        self._refresh_occupancy()
+
+    def set_pushed_state(self, push_state: PushState, owner: Side | None) -> None:
+        self.push_state = push_state
+        self.pushed_owner = owner
+
+    def clear_pushed_state(self) -> None:
+        self.push_state = PushState.CLEAR
+        self.pushed_owner = None
+
+    def _refresh_occupancy(self) -> None:
+        if self.blue_items > 0 and self.yellow_items == 0:
+            self.occupied_by = Side.BLUE
+        elif self.yellow_items > 0 and self.blue_items == 0:
+            self.occupied_by = Side.YELLOW
+        else:
+            self.occupied_by = None
 
     def _approach_ring_points(self) -> tuple[Vec2, ...]:
         if self.approach_ring_radius <= 0.0:
@@ -229,7 +267,7 @@ class Robot:
     position: Vec2
     speed: float = 0.45
     load: int = 0
-    capacity: int = 2
+    capacity: int = 4
     current_action: str | None = None
     current_target_id: int | None = None
     notes: list[str] = field(default_factory=list)

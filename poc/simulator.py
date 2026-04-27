@@ -8,13 +8,19 @@ from typing import Any
 
 from poc.actions import Action, ActionType
 from poc.endgame import EndgameConfig
-from poc.entities import DepositType, Side, SourceState, ThermometerState
+from poc.entities import DepositType, PushState, Side, SourceState, ThermometerState
 from poc.external_events import apply_external_event
 from poc.game_state import GameState
 from poc.geometry import advance_along_path, distance
 from poc.opponent_policy import OpponentPolicy
 from poc.planner import UtilityPlanner
-from poc.scoring import deposit_points
+from poc.policy_mapping import (
+    normalized_action_label,
+    normalized_target_id,
+    policy_metadata_for_deposit,
+    policy_metadata_for_source,
+)
+from poc.scoring import deposit_max_count, deposit_zone_points
 
 
 @dataclass(slots=True)
@@ -36,7 +42,9 @@ class ActionLogEntry:
     time: float
     side: Side
     action: str
+    policy_action: str
     target_id: int | None
+    policy_target_id: str | None
     expected_duration: float
     score: float
 
@@ -56,6 +64,8 @@ class ActivePhase:
     waypoints: tuple[tuple[float, float], ...] = ()
     anchor: tuple[float, float] | None = None
     start_position: tuple[float, float] | None = None
+    clear_source_ids: tuple[int, ...] = ()
+    clear_deposit_ids: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -66,6 +76,7 @@ class ActiveAction:
     phases: list[ActivePhase]
     total_duration: float
     contact_registered: bool = False
+    completed_phases: int = 0
 
 
 @dataclass(slots=True)
@@ -131,8 +142,14 @@ class Simulator:
             planner_debug=self._planner_debug,
             events=self._events,
             field_size=self.state.field_size,
-            sources={source_id: _serialize(source) for source_id, source in self.state.sources.items()},
-            deposits={deposit_id: _serialize(deposit) for deposit_id, deposit in self.state.deposits.items()},
+            sources={
+                source_id: _serialize_with_policy_metadata(source, policy_metadata_for_source(source_id))
+                for source_id, source in self.state.sources.items()
+            },
+            deposits={
+                deposit_id: _serialize_with_policy_metadata(deposit, policy_metadata_for_deposit(deposit_id))
+                for deposit_id, deposit in self.state.deposits.items()
+            },
             thermometer=_serialize(self.state.thermometer),
             endgame={side.value: _serialize(config) for side, config in self.state.endgame_by_side.items()},
             our_side=self.state.our_side.value,
@@ -184,6 +201,8 @@ class Simulator:
             active.start_time = round(active.start_time + self.dt, 6)
             return
 
+        self._advance_completed_phases(active, elapsed)
+
         if elapsed + 1e-9 < active.total_duration:
             return
 
@@ -215,7 +234,9 @@ class Simulator:
                 time=self.state.t,
                 side=side,
                 action=action.label,
+                policy_action=normalized_action_label(action, side),
                 target_id=action.target_id,
+                policy_target_id=normalized_target_id(action.target_id, action.type, side),
                 expected_duration=round(action.expected_duration, 3),
                 score=round(action.score, 3),
             )
@@ -227,14 +248,22 @@ class Simulator:
         if action.type is ActionType.START_ENDGAME:
             endgame = self.state.endgame_config_for(side)
             travel_to_chill = float(action.metadata.get("travel_to_chill", 0.0))
+            travel_to_chill_waypoints = _waypoint_tuple(
+                action.metadata.get("travel_to_chill_waypoints"),
+                fallback=(endgame.chill_point,),
+            )
             wait_duration = float(action.metadata.get("wait_duration", 0.0))
             travel_home = float(action.metadata.get("travel_home", 0.0))
+            travel_home_waypoints = _waypoint_tuple(
+                action.metadata.get("travel_home_waypoints"),
+                fallback=endgame.home_waypoints,
+            )
             grip_rotate = float(action.metadata.get("grip_rotate", endgame.grip_rotate_duration))
             phases.append(
                 ActivePhase(
                     kind="travel",
                     duration=travel_to_chill,
-                    waypoints=(endgame.chill_point,),
+                    waypoints=travel_to_chill_waypoints,
                     start_position=robot.position,
                 )
             )
@@ -249,7 +278,7 @@ class Simulator:
                 ActivePhase(
                     kind="travel",
                     duration=travel_home,
-                    waypoints=endgame.home_waypoints,
+                    waypoints=travel_home_waypoints,
                     start_position=endgame.chill_point,
                 )
             )
@@ -263,14 +292,31 @@ class Simulator:
         elif action.type is ActionType.WAIT:
             phases.append(ActivePhase(kind="service", duration=action.service_duration, anchor=robot.position))
         else:
-            phases.append(
-                ActivePhase(
-                    kind="travel",
-                    duration=action.travel_duration,
-                    waypoints=action.waypoints,
-                    start_position=robot.position,
+            travel_segments = _travel_segments_from_metadata(action.metadata.get("travel_segments"))
+            if travel_segments:
+                current_start = robot.position
+                for segment in travel_segments:
+                    phases.append(
+                        ActivePhase(
+                            kind="travel",
+                            duration=segment["duration"],
+                            waypoints=segment["waypoints"],
+                            start_position=current_start,
+                            clear_source_ids=segment["clear_source_ids"],
+                            clear_deposit_ids=segment["clear_deposit_ids"],
+                        )
+                    )
+                    if segment["waypoints"]:
+                        current_start = segment["waypoints"][-1]
+            else:
+                phases.append(
+                    ActivePhase(
+                        kind="travel",
+                        duration=action.travel_duration,
+                        waypoints=action.waypoints,
+                        start_position=robot.position,
+                    )
                 )
-            )
             phases.append(
                 ActivePhase(
                     kind="service",
@@ -325,7 +371,9 @@ class Simulator:
             return not source.is_available(self.state.t)
         if action.type is ActionType.DEPOSIT and action.target_id is not None:
             deposit = self.state.deposits[action.target_id]
-            return deposit.kind is DepositType.STORAGE and deposit.total_items() > 0
+            robot = self.state.robot_for_side(active.side)
+            requested = int(active.action.metadata.get("deposit_count", robot.load))
+            return requested <= 0 or requested > deposit_max_count(deposit, robot.load)
         if action.type is ActionType.DO_THERMOMETER:
             blocking_source_id = self.state.thermometer.blocking_source_id_for_side(active.side)
             blocking_source = self.state.sources.get(blocking_source_id)
@@ -394,6 +442,29 @@ class Simulator:
             remaining -= phase.duration
         return active.phases[-1] if active.phases else None
 
+    def _advance_completed_phases(self, active: ActiveAction, elapsed: float) -> None:
+        remaining = max(elapsed, 0.0)
+        completed = 0
+        for phase in active.phases:
+            if remaining + 1e-9 < phase.duration:
+                break
+            remaining -= phase.duration
+            completed += 1
+        while active.completed_phases < completed:
+            phase = active.phases[active.completed_phases]
+            self._apply_phase_completion(phase)
+            active.completed_phases += 1
+
+    def _apply_phase_completion(self, phase: ActivePhase) -> None:
+        for source_id in phase.clear_source_ids:
+            source = self.state.sources.get(source_id)
+            if source is not None:
+                source.map_footprint_enabled = False
+        for deposit_id in phase.clear_deposit_ids:
+            deposit = self.state.deposits.get(deposit_id)
+            if deposit is not None:
+                deposit.map_footprint_enabled = False
+
     def _robot_must_yield(self, active: ActiveAction) -> bool:
         other_active = self._active_actions[active.side.opponent()]
         if other_active is None:
@@ -421,28 +492,67 @@ class Simulator:
 
         if action.type is ActionType.DEPOSIT and action.target_id is not None:
             deposit = self.state.deposits[action.target_id]
-            if deposit.kind is DepositType.STORAGE and deposit.total_items() > 0:
+            requested = int(action.metadata.get("deposit_count", robot.load))
+            max_count = deposit_max_count(deposit, robot.load)
+            if requested <= 0 or max_count <= 0:
                 return
-            deposited = robot.load
+            deposited = min(requested, max_count)
             if deposited <= 0:
                 return
+            before_blue = deposit_zone_points(deposit, Side.BLUE)
+            before_yellow = deposit_zone_points(deposit, Side.YELLOW)
+            deposit.clear_pushed_state()
             deposit.add_items(side, deposited)
-            self.state.add_score(side, deposit_points(deposit.kind))
-            robot.load = 0
+            self._apply_deposit_score_delta(deposit, before_blue, before_yellow)
+            robot.load -= deposited
             return
 
         if action.type is ActionType.ATTACK_DEPOSIT and action.target_id is not None:
             deposit = self.state.deposits[action.target_id]
+            before_blue = deposit_zone_points(deposit, Side.BLUE)
+            before_yellow = deposit_zone_points(deposit, Side.YELLOW)
             removed = deposit.items_for_side(side.opponent())
             deposit.clear()
             if removed:
-                self.state.add_score(side.opponent(), -deposit_points(deposit.kind))
+                push_state_raw = str(action.metadata.get("push_state", PushState.CLEAR.value))
+                try:
+                    push_state = PushState(push_state_raw)
+                except ValueError:
+                    push_state = PushState.CLEAR
+                deposit.set_pushed_state(push_state, side.opponent())
+            else:
+                deposit.clear_pushed_state()
+            self._apply_deposit_score_delta(deposit, before_blue, before_yellow)
             return
 
         if action.type is ActionType.DO_THERMOMETER:
+            blocking_source_id = self.state.thermometer.blocking_source_id_for_side(side)
+            source = self.state.sources.get(blocking_source_id)
+            if source is not None:
+                source.available_items = 0
+                source.available_from_t = self.state.t
+                source.state = SourceState.EMPTY
+                source.map_footprint_enabled = False
+
+            blocking_deposit_id = self.state.thermometer.blocking_deposit_id_for_side(side)
+            deposit = self.state.deposits.get(blocking_deposit_id)
+            if deposit is not None:
+                before_blue = deposit_zone_points(deposit, Side.BLUE)
+                before_yellow = deposit_zone_points(deposit, Side.YELLOW)
+                deposit.clear()
+                self._apply_deposit_score_delta(deposit, before_blue, before_yellow)
+
             self.state.thermometer.mark_done_for_side(side)
             self.state.add_score(side, self.state.thermometer.reward)
             return
+
+    def _apply_deposit_score_delta(self, deposit, before_blue: int, before_yellow: int) -> None:
+        after_blue = deposit_zone_points(deposit, Side.BLUE)
+        after_yellow = deposit_zone_points(deposit, Side.YELLOW)
+        if after_blue != before_blue:
+            self.state.add_score(Side.BLUE, after_blue - before_blue)
+        if after_yellow != before_yellow:
+            self.state.add_score(Side.YELLOW, after_yellow - before_yellow)
 
     def _snapshot(self) -> None:
         self._history.append(
@@ -458,6 +568,7 @@ class Simulator:
                     source_id: {
                         "state": _serialize(source.state),
                         "available_items": source.available_items,
+                        "map_footprint_enabled": source.map_footprint_enabled,
                     }
                     for source_id, source in self.state.sources.items()
                 },
@@ -465,6 +576,10 @@ class Simulator:
                     deposit_id: {
                         "blue_items": deposit.blue_items,
                         "yellow_items": deposit.yellow_items,
+                        "map_footprint_enabled": deposit.map_footprint_enabled,
+                        "push_state": _serialize(deposit.push_state),
+                        "pushed_owner": _serialize(deposit.pushed_owner),
+                        "occupied_by": _serialize(deposit.occupied_by),
                     }
                     for deposit_id, deposit in self.state.deposits.items()
                 },
@@ -477,10 +592,9 @@ class Simulator:
             config = self.state.endgame_config_for(side)
             robot = self.state.robot_for_side(side)
             final_distance = distance(robot.position, config.final_home_point)
-            if final_distance <= config.home_full_tolerance:
-                self.state.add_score(side, 10)
-            elif final_distance <= config.home_partial_tolerance:
-                self.state.add_score(side, 5)
+            finish_points = config.finish_points(final_distance)
+            if finish_points:
+                self.state.add_score(side, finish_points)
 
     def _build_summary(self) -> dict[str, float | int | bool | str]:
         our_side = self.state.our_side
@@ -526,3 +640,34 @@ def _serialize(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_serialize(item) for item in value]
     return value
+
+
+def _serialize_with_policy_metadata(value: Any, policy_metadata: dict[str, object]) -> dict[str, Any]:
+    serialized = _serialize(value)
+    assert isinstance(serialized, dict)
+    serialized.update(_serialize(policy_metadata))
+    return serialized
+
+
+def _waypoint_tuple(value: Any, fallback: tuple[tuple[float, float], ...]) -> tuple[tuple[float, float], ...]:
+    if value is None:
+        return fallback
+    return tuple((float(point[0]), float(point[1])) for point in value)
+
+
+def _travel_segments_from_metadata(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    segments: list[dict[str, Any]] = []
+    for segment in value:
+        if not isinstance(segment, dict):
+            continue
+        segments.append(
+            {
+                "waypoints": _waypoint_tuple(segment.get("waypoints"), fallback=()),
+                "duration": float(segment.get("duration", 0.0)),
+                "clear_source_ids": tuple(int(item) for item in segment.get("clear_source_ids", ())),
+                "clear_deposit_ids": tuple(int(item) for item in segment.get("clear_deposit_ids", ())),
+            }
+        )
+    return segments

@@ -30,14 +30,16 @@ class Action:
     risk: float = 0.0
     blocking_penalty: float = 0.0
     swing: float = 0.0
-    duration_source: str = "distance_model+constants"
+    duration_source: str = "grid_astar+constants"
     metadata: dict[str, object] = field(default_factory=dict)
 
     def debug_row(self) -> dict[str, float | int | str | bool | None]:
+        deposit_count = self.metadata.get("deposit_count")
         return {
             "action": self.label,
             "type": self.type.value,
             "target_id": self.target_id,
+            "deposit_count": int(deposit_count) if deposit_count is not None else None,
             "score": round(self.score, 3),
             "reward": round(self.expected_reward, 3),
             "time_cost": round(self.expected_duration, 3),

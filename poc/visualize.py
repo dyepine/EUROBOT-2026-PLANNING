@@ -10,8 +10,8 @@ import numpy as np
 from matplotlib import animation
 from matplotlib.patches import Circle
 
+from poc.config import ActionTimingConfig
 from poc.grid_map import DEFAULT_LAYOUT_PATH, GridOccupancyMap
-from poc.scoring import ActionTimingConfig
 
 
 def save_animation_media(
@@ -364,12 +364,14 @@ def _grid_overlay_rgba(
         for key, source in field_state["sources"].items()
         if int(source.get("available_items", 0)) > 0
         and source.get("state") != "empty"
+        and bool(source.get("map_footprint_enabled", True))
         and str(source.get("map_obstacle_id") or key) in overlay_map.dynamic_start_ids
     }
     overlay_map.active_match_ids = {
         str(deposit.get("map_obstacle_id") or key)
         for key, deposit in field_state["deposits"].items()
         if (int(deposit.get("blue_items", 0)) + int(deposit.get("yellow_items", 0))) > 0
+        and bool(deposit.get("map_footprint_enabled", True))
         and str(deposit.get("map_obstacle_id") or key) in overlay_map.match_obstacles
     }
     if enemy_position is not None:

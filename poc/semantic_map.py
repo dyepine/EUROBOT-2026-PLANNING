@@ -40,16 +40,19 @@ def _mirrored_routes(routes: tuple[RouteOption, ...], suffix: str = "_mirror") -
 
 
 def build_default_semantic_map() -> SemanticMap:
-    source_14_route = _route("collect_14", (0.35, 0.15), (0.35, 0.06))
+    # PICK routes must terminate at the source semantic center so contact and pickup
+    # happen at the same physical location in the simulator.
+    source_14_route = _route("collect_14", (0.35, 0.15), (0.35, 0.06), (0.35, -0.2))
     source_14_back_route = _route(
         "collect_14_back",
         (0.35, -0.55),
         (0.35, -0.46),
+        (0.35, -0.2),
         blocked_by_sources=(13,),
     )
-    source_13_route = _route("collect_13", (0.40, -0.50), (0.40, -0.56))
-    source_12_route = _route("collect_12", (0.99, -0.60), (1.06, -0.60))
-    source_11_route = _route("collect_11", (1.00, 0.20), (1.06, 0.20))
+    source_13_route = _route("collect_13", (0.40, -0.50), (0.40, -0.56), (0.4, -0.825))
+    source_12_route = _route("collect_12", (0.99, -0.60), (1.06, -0.60), (1.325, -0.6))
+    source_11_route = _route("collect_11", (1.00, 0.20), (1.06, 0.20), (1.325, 0.2))
 
     sources = {
         11: SourcePoint(11, (1.325, 0.2), map_obstacle_id="11", collect_routes=(source_11_route,), label="blue_source_upper"),
@@ -81,18 +84,6 @@ def build_default_semantic_map() -> SemanticMap:
         deposit_17_bt_pose[0] - deposit_17_center[0],
         deposit_17_bt_pose[1] - deposit_17_center[1],
     )
-    center_storage_attack_routes = {
-        Side.BLUE: (RouteOption(name="attack_01_center", waypoints=((0.0, -0.2),)),),
-        Side.YELLOW: (RouteOption(name="attack_01_center", waypoints=((0.0, -0.2),)),),
-    }
-    deposit_17_attack_routes = {
-        Side.BLUE: (RouteOption(name="attack_17_center", waypoints=(deposit_17_center,)),),
-        Side.YELLOW: (RouteOption(name="attack_17_center", waypoints=(deposit_17_center,)),),
-    }
-    deposit_27_attack_routes = {
-        Side.BLUE: (RouteOption(name="attack_27_center", waypoints=(deposit_27_center,)),),
-        Side.YELLOW: (RouteOption(name="attack_27_center", waypoints=(deposit_27_center,)),),
-    }
     deposit_10_center = (0.0, -0.90)
     deposit_15_center = (1.40, -0.20)
     deposit_25_center = (-1.40, -0.20)
@@ -144,7 +135,6 @@ def build_default_semantic_map() -> SemanticMap:
             None,
             map_obstacle_id="00",
             approach_ring_radius=upper_storage_ring_radius,
-            attack_routes_by_side=center_storage_attack_routes,
             label="center_storage_upper",
         ),
         10: DepositPoint(
@@ -184,7 +174,6 @@ def build_default_semantic_map() -> SemanticMap:
             None,
             map_obstacle_id="17",
             approach_ring_radius=upper_storage_ring_radius,
-            attack_routes_by_side=deposit_17_attack_routes,
             label="right_upper_storage",
         ),
         25: DepositPoint(
@@ -214,7 +203,6 @@ def build_default_semantic_map() -> SemanticMap:
             None,
             map_obstacle_id="27",
             approach_ring_radius=upper_storage_ring_radius,
-            attack_routes_by_side=deposit_27_attack_routes,
             label="left_upper_storage",
         ),
         101: DepositPoint(

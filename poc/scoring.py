@@ -1,46 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from poc.actions import Action, ActionType
-from poc.entities import DepositType, Side, SourceState, ThermometerState
+from poc.config import DEFAULT_SCORE_CONFIG, ActionTimingConfig, UtilityWeights
+from poc.entities import DepositPoint, DepositType, Side, SourceState
 from poc.game_state import GameState
 from poc.geometry import distance
-
-HOME_DEPOSIT_POINTS = 8
-STORAGE_DEPOSIT_POINTS = 17
-
-
-@dataclass(slots=True)
-class ActionTimingConfig:
-    move_overhead: float = 0.2
-    pick_duration: float = 2.5
-    deposit_duration: float = 5.0
-    thermometer_duration: float = 3.0
-    attack_duration: float = 0.0
-    wait_duration: float = 1.0
-    align_duration: float = 1.0
-    grip_rotate_duration: float = 0.2
-    obstacle_clearance_radius: float = 0.18
-    obstacle_detour_penalty: float = 1.2
-    robot_separation_radius: float = 0.24
-    interaction_radius: float = 0.08
-
-
-@dataclass(slots=True)
-class UtilityWeights:
-    reward_weight: float = 1.6
-    time_weight: float = 1.0
-    risk_weight: float = 2.2
-    blocking_weight: float = 1.3
-    swing_weight: float = 1.2
-
-
-def travel_time(distance_to_target: float, speed: float, timing: ActionTimingConfig) -> float:
-    if distance_to_target == 0.0:
-        return 0.0
-    return distance_to_target / speed + timing.move_overhead
-
 
 def blocking_penalty(
     state: GameState,
@@ -59,8 +23,59 @@ def blocking_penalty(
     return 0.0
 
 
-def deposit_points(kind: DepositType) -> int:
-    return HOME_DEPOSIT_POINTS if kind is DepositType.HOME else STORAGE_DEPOSIT_POINTS
+def home_remaining_capacity(deposit: DepositPoint) -> int:
+    return max(0, DEFAULT_SCORE_CONFIG.home_capacity - deposit.total_items())
+
+
+def deposit_can_accept_load(deposit: DepositPoint, load: int) -> bool:
+    if load <= 0:
+        return False
+    if deposit.kind is DepositType.HOME:
+        return home_remaining_capacity(deposit) > 0
+    return deposit.total_items() == 0
+
+
+def deposit_max_count(deposit: DepositPoint, available_load: int) -> int:
+    if available_load <= 0:
+        return 0
+    if deposit.kind is DepositType.HOME:
+        return min(available_load, home_remaining_capacity(deposit))
+    if deposit.total_items() > 0:
+        return 0
+    return available_load
+
+
+def deposit_majority_owner(deposit: DepositPoint) -> Side | None:
+    if deposit.blue_items > deposit.yellow_items:
+        return Side.BLUE
+    if deposit.yellow_items > deposit.blue_items:
+        return Side.YELLOW
+    return None
+
+
+def deposit_zone_points(deposit: DepositPoint, side: Side) -> int:
+    if deposit.kind is DepositType.HOME:
+        return DEFAULT_SCORE_CONFIG.home_item_points * min(
+            deposit.items_for_side(side),
+            DEFAULT_SCORE_CONFIG.home_capacity,
+        )
+
+    points = DEFAULT_SCORE_CONFIG.storage_item_points * deposit.items_for_side(side)
+    if deposit_majority_owner(deposit) is side and deposit.items_for_side(side) > 0:
+        points += DEFAULT_SCORE_CONFIG.storage_majority_bonus
+    return points
+
+
+def deposit_reward_estimate(deposit: DepositPoint, carried_items: int) -> float:
+    if carried_items <= 0:
+        return 0.0
+    if deposit.kind is DepositType.HOME:
+        valid_items = min(carried_items, home_remaining_capacity(deposit))
+        return float(valid_items * DEFAULT_SCORE_CONFIG.home_item_points)
+    return float(
+        carried_items * DEFAULT_SCORE_CONFIG.storage_item_points
+        + DEFAULT_SCORE_CONFIG.storage_majority_bonus
+    )
 
 
 def evaluate_action(
@@ -78,29 +93,30 @@ def evaluate_action(
     if action.type is ActionType.PICK and action.target_id is not None:
         source = state.sources[action.target_id]
         units = min(source.available_items, robot.capacity - robot.load)
-        reward = 2.0 * units
+        reward = float(DEFAULT_SCORE_CONFIG.storage_item_points * units)
         risk = 0.9 if source.state is SourceState.DISTURBED else 0.25
     elif action.type is ActionType.DEPOSIT and action.target_id is not None:
         deposit = state.deposits[action.target_id]
-        if deposit.kind is DepositType.STORAGE and deposit.total_items() > 0:
+        deposit_count = int(action.metadata.get("deposit_count", robot.load))
+        if deposit_count <= 0 or deposit_count > deposit_max_count(deposit, robot.load):
             reward = -4.0
             risk = 0.9
             swing = 0.0
         else:
-            reward = float(deposit_points(deposit.kind))
+            reward = deposit_reward_estimate(deposit, deposit_count)
             swing = 0.0
             risk = 0.15
     elif action.type is ActionType.ATTACK_DEPOSIT and action.target_id is not None:
         deposit = state.deposits[action.target_id]
-        removable = deposit.items_for_side(side.opponent())
+        removable = deposit_zone_points(deposit, side.opponent())
         reward = 0.0
-        swing = float(STORAGE_DEPOSIT_POINTS if removable > 0 else 0.0)
+        swing = float(removable)
         risk = 0.4
     elif action.type is ActionType.DO_THERMOMETER:
         reward = float(state.thermometer.reward)
         risk = 0.1 if not state.thermometer.is_done_for_side(side) else 1.0
     elif action.type is ActionType.START_ENDGAME:
-        reward = 10.0
+        reward = float(state.endgame_config_for(side).score.finish_full_points)
         risk = 0.05 if action.expected_duration <= state.T_end - state.t else 0.9
     elif action.type is ActionType.WAIT:
         reward = 0.0

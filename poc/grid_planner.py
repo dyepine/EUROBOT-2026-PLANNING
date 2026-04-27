@@ -103,6 +103,13 @@ class GridAStarPlanner:
                 neighbor = (row + d_row, col + d_col)
                 if not self._cell_on_map(neighbor):
                     continue
+                if (
+                    d_row != 0
+                    and d_col != 0
+                    and not self.occupancy_map.is_blocked(row, col, use_inflated=use_inflated)
+                    and self._diagonal_cuts_blocked_corner(current, d_row, d_col, use_inflated=use_inflated)
+                ):
+                    continue
                 if self.occupancy_map.is_blocked(*neighbor, use_inflated=use_inflated):
                     if not allow_obstacle_exit:
                         continue
@@ -211,6 +218,22 @@ class GridAStarPlanner:
     def _cell_on_map(self, cell: tuple[int, int]) -> bool:
         row, col = cell
         return 0 <= row < self.occupancy_map.height_px and 0 <= col < self.occupancy_map.width_px
+
+    def _diagonal_cuts_blocked_corner(
+        self,
+        cell: tuple[int, int],
+        d_row: int,
+        d_col: int,
+        *,
+        use_inflated: bool,
+    ) -> bool:
+        row, col = cell
+        side_cells = ((row + d_row, col), (row, col + d_col))
+        return any(
+            not self._cell_on_map(side_cell)
+            or self.occupancy_map.is_blocked(*side_cell, use_inflated=use_inflated)
+            for side_cell in side_cells
+        )
 
     @staticmethod
     def _heuristic(cell: tuple[int, int], goal: tuple[int, int]) -> float:

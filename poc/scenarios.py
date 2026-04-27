@@ -49,7 +49,7 @@ def build_scenario(name: str, seed: int = 1, our_side: Side = Side.BLUE) -> Scen
                 target_id=12,
                 origin="scripted",
                 note="blue lower source becomes available",
-                payload={"available_items": 2},
+                payload={"available_items": 4},
             ),
             ExternalEvent(
                 time=22.0,
@@ -57,7 +57,7 @@ def build_scenario(name: str, seed: int = 1, our_side: Side = Side.BLUE) -> Scen
                 target_id=22,
                 origin="scripted",
                 note="yellow lower source becomes available",
-                payload={"available_items": 2},
+                payload={"available_items": 4},
             ),
             ExternalEvent(
                 time=55.0,

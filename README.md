@@ -12,6 +12,7 @@
 ```text
 poc/
   actions.py
+  config.py
   endgame.py
   entities.py
   external_events.py
@@ -44,12 +45,6 @@ docs/
 python3 -m poc.main --scenario baseline --output runs/baseline.json
 ```
 
-Явно запустить старый геометрический backend вместо grid A*:
-
-```bash
-python3 -m poc.main --scenario baseline --planner-backend legacy --output runs/baseline_legacy.json
-```
-
 Сценарий с отложенным появлением источников:
 
 ```bash
@@ -73,6 +68,7 @@ python3 -m poc.main --scenario aggressive_enemy --batch 5
 - Семантическая карта поля с источниками, кладовыми, гнёздами и термометром.
 - Pure Python occupancy-grid карта на основе `map_layout.yaml` из боевого репозитория.
 - 8-направленный A* planner без ROS с динамическим включением/выключением кучек и кладовых на карте.
+- Конфиг чисел для scoring, таймингов, весов planner'а и endgame.
 - Endgame-конфиг, совместимый с текущим `ChillSequence`.
 - Константная модель таймингов по типу действия.
 - Fixed-timestep симулятор.

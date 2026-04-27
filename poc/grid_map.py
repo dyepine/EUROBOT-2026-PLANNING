@@ -229,22 +229,33 @@ class GridOccupancyMap:
         self,
         sources: dict[int, SourcePoint],
         deposits: dict[int, DepositPoint],
+        ignored_source_ids: set[int] | None = None,
+        ignored_deposit_ids: set[int] | None = None,
+        dynamic_circles: list[tuple[float, float, float]] | None = None,
     ) -> None:
+        ignored_source_ids = ignored_source_ids or set()
+        ignored_deposit_ids = ignored_deposit_ids or set()
         active_start_ids = {
             source.map_obstacle_id or str(source_id)
             for source_id, source in sources.items()
+            if source_id not in ignored_source_ids
             if source.available_items > 0
             and source.state.value != "empty"
+            and source.map_footprint_enabled
             and (source.map_obstacle_id or str(source_id)) in self.dynamic_start_ids
         }
         active_match_ids = {
             deposit.map_obstacle_id or str(deposit_id)
             for deposit_id, deposit in deposits.items()
+            if deposit_id not in ignored_deposit_ids
             if deposit.total_items() > 0
+            and deposit.map_footprint_enabled
             and (deposit.map_obstacle_id or str(deposit_id)) in self.match_obstacles
         }
         self.active_start_ids = active_start_ids
         self.active_match_ids = active_match_ids
+        if dynamic_circles is not None:
+            self.dynamic_circles = list(dynamic_circles)
         self.rebuild()
 
     def rebuild(self) -> None:
