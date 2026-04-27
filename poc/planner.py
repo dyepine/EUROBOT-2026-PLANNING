@@ -217,11 +217,12 @@ class UtilityPlanner:
             return None
         travel = planned_route.travel_duration
         service = self.timing.pick_duration + self.timing.align_duration
+        target_position = self._route_target_position(planned_route, fallback=source.position)
         return Action(
             type=ActionType.PICK,
             target_id=source.semantic_id,
             label=f"PICK_{source.semantic_id}",
-            target_position=planned_route.motion_waypoints[-1],
+            target_position=target_position,
             waypoints=planned_route.motion_waypoints,
             service_duration=service,
             travel_duration=travel,
@@ -249,11 +250,12 @@ class UtilityPlanner:
             return None
         travel = planned_route.travel_duration
         service = self.timing.deposit_duration
+        target_position = self._route_target_position(planned_route, fallback=deposit.position)
         return Action(
             type=ActionType.DEPOSIT,
             target_id=deposit.semantic_id,
             label=f"DEPOSIT_{deposit.semantic_id}_X{deposit_count}",
-            target_position=planned_route.motion_waypoints[-1],
+            target_position=target_position,
             waypoints=planned_route.motion_waypoints,
             service_duration=service,
             travel_duration=travel,
@@ -290,11 +292,12 @@ class UtilityPlanner:
         travel = planned_route.travel_duration
         # Deposit destruction resolves immediately on arrival at the zone center.
         service = 0.0
+        target_position = self._route_target_position(planned_route, fallback=deposit.position)
         return Action(
             type=ActionType.ATTACK_DEPOSIT,
             target_id=deposit.semantic_id,
             label=f"ATTACK_{deposit.semantic_id}",
-            target_position=planned_route.motion_waypoints[-1],
+            target_position=target_position,
             waypoints=planned_route.motion_waypoints,
             service_duration=service,
             travel_duration=travel,
@@ -337,11 +340,12 @@ class UtilityPlanner:
         if planned_motion is None:
             return None
         service = self.timing.thermometer_duration
+        target_position = self._route_target_position(planned_motion, fallback=route[-1])
         return Action(
             type=ActionType.DO_THERMOMETER,
             target_id=thermometer.semantic_id,
             label="THERMOMETER",
-            target_position=planned_motion.motion_waypoints[-1],
+            target_position=target_position,
             waypoints=planned_motion.motion_waypoints,
             service_duration=service,
             travel_duration=planned_motion.travel_duration,
@@ -736,6 +740,17 @@ class UtilityPlanner:
         blocking_deposit = state.deposits.get(blocking_deposit_id)
         blocking_deposit_clear = blocking_deposit is None or blocking_deposit.total_items() == 0
         return blocking_source_clear and zone_10_clear and blocking_deposit_clear
+
+    @staticmethod
+    def _route_target_position(
+        planned_route: PlannedRoute,
+        fallback: tuple[float, float],
+    ) -> tuple[float, float]:
+        if planned_route.motion_waypoints:
+            return planned_route.motion_waypoints[-1]
+        if planned_route.semantic_waypoints:
+            return planned_route.semantic_waypoints[-1]
+        return fallback
 
 
 def _policy_debug_row(action: Action, side: Side) -> dict[str, float | int | str | bool | None]:
