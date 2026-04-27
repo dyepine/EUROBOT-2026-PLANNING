@@ -11,7 +11,7 @@ from poc.entities import DepositPoint, SourcePoint
 
 OCCUPIED = 100
 FREE = 0
-DEFAULT_LAYOUT_PATH = Path("/home/napalkov/coding/EUROBOT_2026_PC/data/configs/map_publisher_config/map_layout.yaml")
+DEFAULT_LAYOUT_PATH = Path(__file__).resolve().parent / "data" / "map_layout.yaml"
 
 
 @dataclass(slots=True, frozen=True)

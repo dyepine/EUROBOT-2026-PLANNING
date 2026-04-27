@@ -66,7 +66,7 @@ python3 -m poc.main --scenario aggressive_enemy --batch 5
 ## Что уже есть в каркасе
 
 - Семантическая карта поля с источниками, кладовыми, гнёздами и термометром.
-- Pure Python occupancy-grid карта на основе `map_layout.yaml` из боевого репозитория.
+- Pure Python occupancy-grid карта на основе `map_layout.yaml`, лежащего прямо в этом репозитории.
 - 8-направленный A* planner без ROS с динамическим включением/выключением кучек и кладовых на карте.
 - Конфиг чисел для scoring, таймингов, весов planner'а и endgame.
 - Endgame-конфиг, совместимый с текущим `ChillSequence`.
@@ -77,7 +77,7 @@ python3 -m poc.main --scenario aggressive_enemy --batch 5
 
 ## Notebook
 
-Откройте [notebooks/poc_results_overview.ipynb](/home/napalkov/coding/EUROBOT-2026-PLANNING/notebooks/poc_results_overview.ipynb).
+Откройте `notebooks/poc_results_overview.ipynb`.
 
 В ноутбуке можно:
 - прогнать один матч и посмотреть summary;
