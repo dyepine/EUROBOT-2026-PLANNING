@@ -19,7 +19,12 @@ class Scenario:
     opponent_policy: OpponentPolicy
 
 
-def build_scenario(name: str, seed: int = 1, our_side: Side = Side.BLUE) -> Scenario:
+def build_scenario(
+    name: str,
+    seed: int = 1,
+    our_side: Side = Side.BLUE,
+    opponent_policy_name: str | None = None,
+) -> Scenario:
     del seed  # scaffold placeholder for reproducible stochastic extensions
 
     semantic_map = build_default_semantic_map().clone()
@@ -33,7 +38,7 @@ def build_scenario(name: str, seed: int = 1, our_side: Side = Side.BLUE) -> Scen
     enemy_robot = yellow_robot if our_side is Side.BLUE else blue_robot
 
     external_events: list[ExternalEvent] = []
-    opponent_policy_name = "nearest_greedy"
+    scenario_opponent_policy_name = "nearest_greedy"
 
     if name == "delayed_sources":
         semantic_map.sources[12].available_from_t = 18.0
@@ -68,9 +73,9 @@ def build_scenario(name: str, seed: int = 1, our_side: Side = Side.BLUE) -> Scen
             ),
         ]
     elif name == "aggressive_enemy":
-        opponent_policy_name = "aggressive"
+        scenario_opponent_policy_name = "aggressive"
     elif name == "thermo_first_enemy":
-        opponent_policy_name = "thermo_first"
+        scenario_opponent_policy_name = "thermo_first"
     elif name != "baseline":
         raise ValueError(f"Unknown scenario: {name}")
 
@@ -96,7 +101,7 @@ def build_scenario(name: str, seed: int = 1, our_side: Side = Side.BLUE) -> Scen
         name=name,
         description=_scenario_description(name),
         game_state=game_state,
-        opponent_policy=build_opponent_policy(opponent_policy_name),
+        opponent_policy=build_opponent_policy(opponent_policy_name or scenario_opponent_policy_name),
     )
 
 

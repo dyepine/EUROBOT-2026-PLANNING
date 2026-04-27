@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from poc.actions import Action, ActionType
 from poc.endgame import EndgameConfig
@@ -13,12 +14,20 @@ from poc.external_events import apply_external_event
 from poc.game_state import GameState
 from poc.geometry import advance_along_path, distance
 from poc.opponent_policy import OpponentPolicy
-from poc.planner import UtilityPlanner
+from poc.planner import PlanningDecision, UtilityPlanner
 from poc.policy_mapping import (
     normalized_action_label,
     normalized_target_id,
     policy_metadata_for_deposit,
     policy_metadata_for_source,
+)
+from poc.rl_infra import (
+    DEFAULT_ACTION_SPACE,
+    RLPolicyStep,
+    RLTransition,
+    build_rl_observation,
+    build_rl_policy_step,
+    save_transition_dataset,
 )
 from poc.scoring import deposit_max_count, deposit_zone_points
 
@@ -85,6 +94,7 @@ class MatchResult:
     summary: dict[str, float | int | bool | str]
     history: list[HistoryEntry]
     action_log: list[ActionLogEntry]
+    rl_transitions: list[RLTransition]
     planner_debug: list[dict[str, object]]
     events: list[SimulationEvent]
     field_size: tuple[float, float]
@@ -95,6 +105,30 @@ class MatchResult:
     our_side: str
 
 
+@dataclass(slots=True)
+class PendingRLTransition:
+    time: float
+    step: RLPolicyStep
+    chosen_action: str
+    chosen_action_index: int
+    score_diff_before: float
+
+
+class ActionSelector(Protocol):
+    name: str
+
+    def select_action(
+        self,
+        *,
+        state: GameState,
+        planner: UtilityPlanner,
+        side: Side,
+        ranked_actions: list[Action],
+        policy_step: RLPolicyStep,
+    ) -> Action:
+        ...
+
+
 class Simulator:
     def __init__(
         self,
@@ -103,20 +137,31 @@ class Simulator:
         opponent_policy: OpponentPolicy,
         planner: UtilityPlanner | None = None,
         dt: float = 0.5,
+        action_selectors: dict[Side, ActionSelector] | None = None,
+        terminal_win_bonus: float = 20.0,
+        terminal_draw_bonus: float = 0.0,
+        terminal_loss_bonus: float = -20.0,
     ) -> None:
         self.state = state
         self.scenario_name = scenario_name
         self.opponent_policy = opponent_policy
         self.planner = planner or UtilityPlanner()
         self.dt = dt
+        self.action_selectors = dict(action_selectors or {})
+        self.terminal_win_bonus = terminal_win_bonus
+        self.terminal_draw_bonus = terminal_draw_bonus
+        self.terminal_loss_bonus = terminal_loss_bonus
         self._event_index = 0
         self._active_actions: dict[Side, ActiveAction | None] = {Side.BLUE: None, Side.YELLOW: None}
         self._history: list[HistoryEntry] = []
         self._action_log: list[ActionLogEntry] = []
+        self._rl_transitions: list[RLTransition] = []
+        self._pending_rl: dict[Side, PendingRLTransition | None] = {Side.BLUE: None, Side.YELLOW: None}
         self._planner_debug: list[dict[str, object]] = []
         self._events: list[SimulationEvent] = []
         self._replan_count = 0
         self._lost_target_count = 0
+        self._previous_tick_state: GameState | None = None
 
     def run(self) -> MatchResult:
         while self.state.t < self.state.T_end:
@@ -128,17 +173,20 @@ class Simulator:
                     self._assign_next_action(side)
 
             self._snapshot()
+            self._previous_tick_state = deepcopy(self.state)
             self.state.t = round(min(self.state.T_end, self.state.t + self.dt), 6)
 
         self._apply_pending_events()
         for side in (Side.BLUE, Side.YELLOW):
             self._update_active_action(side)
         self._finalize_match()
+        self._finalize_rl_transitions()
         return MatchResult(
             scenario_name=self.scenario_name,
             summary=self._build_summary(),
             history=self._history,
             action_log=self._action_log,
+            rl_transitions=self._rl_transitions,
             planner_debug=self._planner_debug,
             events=self._events,
             field_size=self.state.field_size,
@@ -213,12 +261,56 @@ class Simulator:
         self._active_actions[side] = None
 
     def _assign_next_action(self, side: Side) -> None:
-        if side is self.state.our_side:
+        selector = self.action_selectors.get(side)
+        if side is self.state.our_side and selector is None:
             decision = self.planner.plan(self.state, side)
             action = decision.chosen_action
+            ranked_actions = decision.ranked_actions
             self._planner_debug.append(decision.debug_payload(self.state.t, side))
         else:
-            action = self.opponent_policy.choose_action(self.state, self.planner, side)
+            ranked_actions = self.planner.rank_actions(self.state, side)
+            policy_step = build_rl_policy_step(
+                self.state,
+                side,
+                ranked_actions=ranked_actions,
+                previous_state=self._previous_tick_state,
+                dt=self.dt,
+                action_space=DEFAULT_ACTION_SPACE,
+            )
+            if selector is None:
+                action = self.opponent_policy.choose_action(self.state, self.planner, side)
+            else:
+                action = selector.select_action(
+                    state=self.state,
+                    planner=self.planner,
+                    side=side,
+                    ranked_actions=ranked_actions,
+                    policy_step=policy_step,
+                )
+                if side is self.state.our_side:
+                    decision = PlanningDecision(
+                        chosen_action=action,
+                        ranked_actions=ranked_actions,
+                        reason=f"selector:{selector.name}",
+                    )
+                    self._planner_debug.append(decision.debug_payload(self.state.t, side))
+        if side is self.state.our_side and selector is None:
+            policy_step = build_rl_policy_step(
+                self.state,
+                side,
+                ranked_actions=ranked_actions,
+                previous_state=self._previous_tick_state,
+                dt=self.dt,
+                action_space=DEFAULT_ACTION_SPACE,
+            )
+        chosen_policy_action = normalized_action_label(action, side)
+        chosen_policy_action_index = DEFAULT_ACTION_SPACE.encode(chosen_policy_action)
+        self._finalize_pending_rl_transition(
+            side,
+            next_step=policy_step,
+            score_diff_after=self._score_diff_for_side(side),
+            done=False,
+        )
 
         active_action = self._activate_action(side, action)
         self._active_actions[side] = active_action
@@ -240,6 +332,13 @@ class Simulator:
                 expected_duration=round(action.expected_duration, 3),
                 score=round(action.score, 3),
             )
+        )
+        self._pending_rl[side] = PendingRLTransition(
+            time=round(self.state.t, 6),
+            step=policy_step,
+            chosen_action=chosen_policy_action,
+            chosen_action_index=chosen_policy_action_index,
+            score_diff_before=self._score_diff_for_side(side),
         )
 
     def _activate_action(self, side: Side, action: Action) -> ActiveAction:
@@ -615,8 +714,83 @@ class Simulator:
             "thermometer_used": any(log.action == "THERMOMETER" and log.side is our_side for log in self._action_log),
             "start_endgame_used": any(log.action == "START_ENDGAME" and log.side is our_side for log in self._action_log),
             "history_points": len(self._history),
-            "enemy_policy": self.opponent_policy.name,
+            "enemy_policy": self._controller_name_for_side(enemy_side),
         }
+
+    def _score_diff_for_side(self, side: Side) -> float:
+        return float(self.state.score_for_side(side) - self.state.score_for_side(side.opponent()))
+
+    def _finalize_pending_rl_transition(
+        self,
+        side: Side,
+        next_step: RLPolicyStep,
+        score_diff_after: float,
+        done: bool,
+    ) -> None:
+        pending = self._pending_rl[side]
+        if pending is None:
+            return
+        reward = score_diff_after - pending.score_diff_before
+        if done:
+            reward += self._terminal_bonus_for_side(side)
+        self._rl_transitions.append(
+            RLTransition(
+                side=side.value,
+                time=pending.time,
+                chosen_action=pending.chosen_action,
+                chosen_action_index=pending.chosen_action_index,
+                action_mask=pending.step.action_mask,
+                observation=pending.step.observation,
+                reward=reward,
+                next_observation=next_step.observation,
+                next_action_mask=next_step.action_mask,
+                done=done,
+                score_diff_before=pending.score_diff_before,
+                score_diff_after=score_diff_after,
+            )
+        )
+        self._pending_rl[side] = None
+
+    def _terminal_bonus_for_side(self, side: Side) -> float:
+        score_diff = self._score_diff_for_side(side)
+        if score_diff > 0.0:
+            return self.terminal_win_bonus
+        if score_diff < 0.0:
+            return self.terminal_loss_bonus
+        return self.terminal_draw_bonus
+
+    def _controller_name_for_side(self, side: Side) -> str:
+        selector = self.action_selectors.get(side)
+        if selector is not None:
+            return selector.name
+        if side is self.state.our_side:
+            return "planner"
+        return self.opponent_policy.name
+
+    def _finalize_rl_transitions(self) -> None:
+        zero_mask = tuple(0 for _ in DEFAULT_ACTION_SPACE.tokens)
+        for side in (Side.BLUE, Side.YELLOW):
+            pending = self._pending_rl[side]
+            if pending is None:
+                continue
+            terminal_observation = build_rl_observation(
+                self.state,
+                side,
+                previous_state=self._previous_tick_state,
+                dt=self.dt,
+            )
+            terminal_step = RLPolicyStep(
+                observation=terminal_observation,
+                action_space=DEFAULT_ACTION_SPACE,
+                action_mask=zero_mask,
+                candidates=(),
+            )
+            self._finalize_pending_rl_transition(
+                side,
+                next_step=terminal_step,
+                score_diff_after=self._score_diff_for_side(side),
+                done=True,
+            )
 
 
 def save_result(result: MatchResult, path: str | Path) -> Path:
@@ -628,6 +802,11 @@ def save_result(result: MatchResult, path: str | Path) -> Path:
 
 def load_result(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def save_rl_dataset(result: MatchResult, path: str | Path, side: Side | None = None) -> Path:
+    transitions = result.rl_transitions if side is None else [item for item in result.rl_transitions if item.side == side.value]
+    return save_transition_dataset(transitions, path)
 
 
 def _serialize(value: Any) -> Any:
