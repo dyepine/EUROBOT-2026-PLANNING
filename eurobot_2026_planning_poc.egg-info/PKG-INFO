@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: eurobot-2026-planning-poc
-Version: 0.1.0
-Summary: A lightweight Eurobot 2026 strategy POC simulator.
-Requires-Python: >=3.10
-Requires-Dist: matplotlib>=3.7
-Provides-Extra: notebook
-Requires-Dist: jupyter>=1.0; extra == "notebook"
