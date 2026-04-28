@@ -119,6 +119,14 @@ def aggregate_eval_metrics(summaries: list[EvaluationSummary]) -> tuple[float, f
     return winrate, score_diff
 
 
+def aggregate_eval_metrics_for_opponents(
+    summaries: list[EvaluationSummary],
+    opponent_names: set[str],
+) -> tuple[float, float]:
+    filtered = [summary for summary in summaries if summary.opponent in opponent_names]
+    return aggregate_eval_metrics(filtered)
+
+
 def main(argv: list[str] | None = None) -> int:
     _require_torch()
     args = build_parser().parse_args(argv)
@@ -138,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     best_winrate = float("-inf")
     best_winrate_tiebreak = float("-inf")
     best_score_diff = float("-inf")
+    scripted_opponents = set(config.eval_opponents)
 
     for update_id in range(1, config.updates + 1):
         rollout_batch, match_summaries = build_rollout_batch(
@@ -172,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         eval_summaries: list[EvaluationSummary] = []
         overall_winrate = 0.0
         overall_score_diff = 0.0
+        scripted_eval_winrate = 0.0
+        scripted_eval_score_diff = 0.0
         if update_id % config.eval_every_updates == 0:
             eval_summaries = evaluate_policy(
                 config=config,
@@ -181,13 +192,17 @@ def main(argv: list[str] | None = None) -> int:
                 opponent_specs=build_eval_opponents(config, opponent_pool),
             )
             overall_winrate, overall_score_diff = aggregate_eval_metrics(eval_summaries)
+            scripted_eval_winrate, scripted_eval_score_diff = aggregate_eval_metrics_for_opponents(
+                eval_summaries,
+                scripted_opponents,
+            )
             is_best_winrate = (
-                overall_winrate > best_winrate
-                or overall_winrate == best_winrate and overall_score_diff > best_winrate_tiebreak
+                scripted_eval_winrate > best_winrate
+                or scripted_eval_winrate == best_winrate and scripted_eval_score_diff > best_winrate_tiebreak
             )
             if is_best_winrate:
-                best_winrate = overall_winrate
-                best_winrate_tiebreak = overall_score_diff
+                best_winrate = scripted_eval_winrate
+                best_winrate_tiebreak = scripted_eval_score_diff
                 save_policy_checkpoint(
                     output_dir / "best_winrate.pt",
                     model=learner_model,
@@ -195,10 +210,16 @@ def main(argv: list[str] | None = None) -> int:
                     update_id=update_id,
                     observation_dim=observation_dim(),
                     action_dim=action_dim(),
-                    metadata={"metric": "winrate", "winrate": overall_winrate, "score_diff": overall_score_diff},
+                    metadata={
+                        "metric": "scripted_winrate",
+                        "scripted_winrate": scripted_eval_winrate,
+                        "scripted_score_diff": scripted_eval_score_diff,
+                        "overall_winrate": overall_winrate,
+                        "overall_score_diff": overall_score_diff,
+                    },
                 )
-            if overall_score_diff > best_score_diff:
-                best_score_diff = overall_score_diff
+            if scripted_eval_score_diff > best_score_diff:
+                best_score_diff = scripted_eval_score_diff
                 save_policy_checkpoint(
                     output_dir / "best_score_diff.pt",
                     model=learner_model,
@@ -206,7 +227,13 @@ def main(argv: list[str] | None = None) -> int:
                     update_id=update_id,
                     observation_dim=observation_dim(),
                     action_dim=action_dim(),
-                    metadata={"metric": "score_diff", "winrate": overall_winrate, "score_diff": overall_score_diff},
+                    metadata={
+                        "metric": "scripted_score_diff",
+                        "scripted_winrate": scripted_eval_winrate,
+                        "scripted_score_diff": scripted_eval_score_diff,
+                        "overall_winrate": overall_winrate,
+                        "overall_score_diff": overall_score_diff,
+                    },
                 )
 
         save_training_state(
@@ -239,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
             "evaluation": [asdict(summary) for summary in eval_summaries],
             "overall_eval_winrate": overall_winrate,
             "overall_eval_score_diff": overall_score_diff,
+            "scripted_eval_winrate": scripted_eval_winrate,
+            "scripted_eval_score_diff": scripted_eval_score_diff,
             "best_winrate": best_winrate,
             "best_score_diff": best_score_diff,
         }
@@ -247,8 +276,9 @@ def main(argv: list[str] | None = None) -> int:
             handle.write("\n")
         print(
             f"update={update_id} steps={update_stats.steps} episodes={update_stats.episodes} "
-            f"loss={update_stats.total_loss:.4f} eval_winrate={overall_winrate:.3f} "
-            f"eval_score_diff={overall_score_diff:.3f}"
+            f"loss={update_stats.total_loss:.4f} scripted_eval_winrate={scripted_eval_winrate:.3f} "
+            f"scripted_eval_score_diff={scripted_eval_score_diff:.3f} "
+            f"overall_eval_winrate={overall_winrate:.3f} overall_eval_score_diff={overall_score_diff:.3f}"
         )
 
     return 0

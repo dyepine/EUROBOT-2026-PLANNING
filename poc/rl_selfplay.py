@@ -316,13 +316,15 @@ def build_rollout_batch(
     episode_counter = 0
     steps = 0
     matches = 0
+    target_steps = max(config.steps_per_update, 1)
+    minimum_matches = max(config.matches_per_update, 1)
     learner_selector = TorchPolicySelector(
         model=learner_model,
         device=config.device,
         greedy=False,
         name="learner_policy",
     )
-    while steps < config.steps_per_update and matches < config.matches_per_update:
+    while steps < target_steps or matches < minimum_matches:
         scenario_name = rng.choice(config.training_scenarios)
         seed = rng.randint(1, 10_000_000)
         opponent_spec = sample_training_opponent(opponent_pool, config, rng)
