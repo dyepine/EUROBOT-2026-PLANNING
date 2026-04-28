@@ -11,7 +11,18 @@ from poc.simulator import Simulator, save_result
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Eurobot 2026 planning POC simulator.")
-    parser.add_argument("--scenario", default="baseline", choices=["baseline", "delayed_sources", "aggressive_enemy", "thermo_first_enemy"])
+    parser.add_argument(
+        "--scenario",
+        default="baseline",
+        choices=[
+            "baseline",
+            "delayed_sources",
+            "aggressive_enemy",
+            "thermo_first_enemy",
+            "storage_first_enemy",
+            "home_safe_enemy",
+        ],
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dt", type=float, default=0.5)
     parser.add_argument("--output", type=Path, default=Path("runs") / "latest_match.json")

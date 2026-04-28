@@ -7,6 +7,13 @@ from poc.entities import Side
 DEFAULT_TRAINING_SCENARIOS = ("baseline", "delayed_sources")
 DEFAULT_EVAL_SCENARIOS = ("baseline", "delayed_sources")
 DEFAULT_EVAL_OPPONENTS = ("nearest_greedy", "aggressive", "thermo_first")
+DEFAULT_TRAINING_SCRIPTED_OPPONENTS = (
+    "nearest_greedy",
+    "aggressive",
+    "thermo_first",
+    "storage_first",
+    "home_safe",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +68,8 @@ class SelfPlayConfig:
     updates: int = 100
     hidden_sizes: tuple[int, ...] = (256, 256)
     training_scenarios: tuple[str, ...] = field(default_factory=lambda: DEFAULT_TRAINING_SCENARIOS)
+    training_scripted_opponents: tuple[str, ...] = field(default_factory=lambda: DEFAULT_TRAINING_SCRIPTED_OPPONENTS)
+    training_scripted_fraction: float = 0.30
     eval_scenarios: tuple[str, ...] = field(default_factory=lambda: DEFAULT_EVAL_SCENARIOS)
     eval_opponents: tuple[str, ...] = field(default_factory=lambda: DEFAULT_EVAL_OPPONENTS)
     eval_matches_per_opponent: int = 4
@@ -119,6 +128,10 @@ def selfplay_config_from_dict(payload: dict[str, object]) -> SelfPlayConfig:
         updates=int(payload.get("updates", 100)),
         hidden_sizes=tuple(int(value) for value in payload.get("hidden_sizes", (256, 256))),
         training_scenarios=tuple(str(value) for value in payload.get("training_scenarios", DEFAULT_TRAINING_SCENARIOS)),
+        training_scripted_opponents=tuple(
+            str(value) for value in payload.get("training_scripted_opponents", DEFAULT_TRAINING_SCRIPTED_OPPONENTS)
+        ),
+        training_scripted_fraction=float(payload.get("training_scripted_fraction", 0.30)),
         eval_scenarios=tuple(str(value) for value in payload.get("eval_scenarios", DEFAULT_EVAL_SCENARIOS)),
         eval_opponents=tuple(str(value) for value in payload.get("eval_opponents", DEFAULT_EVAL_OPPONENTS)),
         eval_matches_per_opponent=int(payload.get("eval_matches_per_opponent", 4)),

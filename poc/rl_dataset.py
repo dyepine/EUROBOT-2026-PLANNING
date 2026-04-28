@@ -11,8 +11,15 @@ from poc.rl_infra import transition_to_record
 from poc.scenarios import build_scenario
 from poc.simulator import Simulator
 
-DEFAULT_SCENARIOS = ("baseline", "delayed_sources", "aggressive_enemy", "thermo_first_enemy")
-DEFAULT_OPPONENT_POLICIES = ("nearest_greedy", "aggressive", "thermo_first")
+DEFAULT_SCENARIOS = (
+    "baseline",
+    "delayed_sources",
+    "aggressive_enemy",
+    "thermo_first_enemy",
+    "storage_first_enemy",
+    "home_safe_enemy",
+)
+DEFAULT_OPPONENT_POLICIES = ("nearest_greedy", "aggressive", "thermo_first", "storage_first", "home_safe")
 
 
 @dataclass(frozen=True, slots=True)

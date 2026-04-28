@@ -127,6 +127,7 @@ def save_training_state(
     observation_dim: int,
     action_dim: int,
     best_winrate: float,
+    best_winrate_tiebreak: float,
     best_score_diff: float,
     rng: random.Random,
 ) -> Path:
@@ -142,10 +143,12 @@ def save_training_state(
             "observation_dim": observation_dim,
             "action_dim": action_dim,
             "best_winrate": best_winrate,
+            "best_winrate_tiebreak": best_winrate_tiebreak,
             "best_score_diff": best_score_diff,
             "opponent_pool": opponent_pool.to_state(),
             "python_random_state": rng.getstate(),
             "torch_rng_state": torch.get_rng_state(),
+            "torch_cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         },
         output,
     )

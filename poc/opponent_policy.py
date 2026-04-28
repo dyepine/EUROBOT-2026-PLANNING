@@ -67,9 +67,63 @@ class ThermoFirstPolicy(OpponentPolicy):
         return self._fallback.choose_action(state, planner, side)
 
 
+class StorageFirstPolicy(OpponentPolicy):
+    def __init__(self) -> None:
+        super().__init__(name="storage_first")
+        self._fallback = NearestGreedyPolicy()
+
+    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
+        ranked = planner.rank_actions(state, side)
+        robot = state.robot_for_side(side)
+        if robot.load > 0:
+            deposits = [action for action in ranked if action.type is ActionType.DEPOSIT]
+            storage_deposits = [
+                action
+                for action in deposits
+                if action.target_id is not None
+                and state.deposits[action.target_id].kind.value == "storage"
+            ]
+            if storage_deposits:
+                return max(storage_deposits, key=lambda action: (action.score, -action.expected_duration))
+            if deposits:
+                return max(deposits, key=lambda action: (action.score, -action.expected_duration))
+        return self._fallback.choose_action(state, planner, side)
+
+
+class HomeSafePolicy(OpponentPolicy):
+    def __init__(self) -> None:
+        super().__init__(name="home_safe")
+        self._fallback = NearestGreedyPolicy()
+
+    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
+        ranked = planner.rank_actions(state, side)
+        robot = state.robot_for_side(side)
+        if state.t >= state.endgame_config_for(side).main_pipeline_deadline:
+            endgame = [action for action in ranked if action.type is ActionType.START_ENDGAME]
+            if endgame:
+                return endgame[0]
+        if robot.load > 0:
+            deposits = [action for action in ranked if action.type is ActionType.DEPOSIT]
+            home_deposits = [
+                action
+                for action in deposits
+                if action.target_id is not None
+                and state.deposits[action.target_id].kind.value == "home"
+            ]
+            if home_deposits:
+                return min(home_deposits, key=lambda action: action.expected_duration)
+            if deposits:
+                return min(deposits, key=lambda action: action.expected_duration)
+        return self._fallback.choose_action(state, planner, side)
+
+
 def build_opponent_policy(name: str) -> OpponentPolicy:
     if name == "aggressive":
         return AggressivePolicy()
     if name == "thermo_first":
         return ThermoFirstPolicy()
+    if name == "storage_first":
+        return StorageFirstPolicy()
+    if name == "home_safe":
+        return HomeSafePolicy()
     return NearestGreedyPolicy()

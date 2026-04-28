@@ -11,8 +11,14 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised only when torch is unavailable
     torch = None
 
-from poc.rl_checkpoint import OpponentPool, save_policy_checkpoint, save_training_state
-from poc.rl_config import DEFAULT_EVAL_OPPONENTS, DEFAULT_TRAINING_SCENARIOS, SelfPlayConfig
+from poc.rl_checkpoint import OpponentPool, load_training_state, save_policy_checkpoint, save_training_state
+from poc.rl_config import (
+    DEFAULT_EVAL_OPPONENTS,
+    DEFAULT_TRAINING_SCENARIOS,
+    DEFAULT_TRAINING_SCRIPTED_OPPONENTS,
+    SelfPlayConfig,
+    selfplay_config_from_dict,
+)
 from poc.rl_ppo import ppo_update
 from poc.rl_selfplay import (
     EvaluationSummary,
@@ -34,9 +40,10 @@ def _require_torch() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a self-play PPO policy for the Eurobot POC.")
-    parser.add_argument("--output-dir", type=Path, default=Path("runs") / "ppo_selfplay")
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default=None)
     parser.add_argument("--steps-per-update", type=int, default=1024)
     parser.add_argument("--matches-per-update", type=int, default=16)
     parser.add_argument("--epochs-per-update", type=int, default=4)
@@ -53,9 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--opponent-pool-size", type=int, default=8)
     parser.add_argument("--checkpoint-every-updates", type=int, default=1)
     parser.add_argument("--eval-every-updates", type=int, default=5)
-    parser.add_argument("--updates", type=int, default=100)
+    parser.add_argument("--updates", type=int, default=None)
     parser.add_argument("--hidden-sizes", nargs="+", type=int, default=[256, 256])
     parser.add_argument("--training-scenarios", nargs="+", default=list(DEFAULT_TRAINING_SCENARIOS))
+    parser.add_argument("--training-scripted-opponents", nargs="+", default=list(DEFAULT_TRAINING_SCRIPTED_OPPONENTS))
+    parser.add_argument("--training-scripted-fraction", type=float, default=0.30)
     parser.add_argument("--eval-scenarios", nargs="+", default=["baseline", "delayed_sources"])
     parser.add_argument("--eval-opponents", nargs="+", default=list(DEFAULT_EVAL_OPPONENTS))
     parser.add_argument("--eval-matches-per-opponent", type=int, default=4)
@@ -67,7 +76,7 @@ def build_config(args: argparse.Namespace) -> SelfPlayConfig:
 
     return SelfPlayConfig(
         seed=args.seed,
-        device=args.device,
+        device=args.device or "cpu",
         steps_per_update=args.steps_per_update,
         matches_per_update=args.matches_per_update,
         epochs_per_update=args.epochs_per_update,
@@ -84,13 +93,36 @@ def build_config(args: argparse.Namespace) -> SelfPlayConfig:
         opponent_pool_size=args.opponent_pool_size,
         checkpoint_every_updates=args.checkpoint_every_updates,
         eval_every_updates=args.eval_every_updates,
-        updates=args.updates,
+        updates=args.updates if args.updates is not None else 100,
         hidden_sizes=tuple(args.hidden_sizes),
         training_scenarios=tuple(args.training_scenarios),
+        training_scripted_opponents=tuple(args.training_scripted_opponents),
+        training_scripted_fraction=args.training_scripted_fraction,
         eval_scenarios=tuple(args.eval_scenarios),
         eval_opponents=tuple(args.eval_opponents),
         eval_matches_per_opponent=args.eval_matches_per_opponent,
     )
+
+
+def resolve_output_dir(args: argparse.Namespace, resume_path: Path | None) -> Path:
+    if args.output_dir is not None:
+        return args.output_dir
+    if resume_path is not None:
+        return resume_path.resolve().parent
+    return Path("runs") / "ppo_selfplay"
+
+
+def config_for_resume(
+    args: argparse.Namespace,
+    saved_config: SelfPlayConfig,
+) -> SelfPlayConfig:
+    payload = saved_config.to_dict()
+    payload.pop("ppo", None)
+    if args.device is not None:
+        payload["device"] = args.device
+    if args.updates is not None:
+        payload["updates"] = args.updates
+    return selfplay_config_from_dict(payload)
 
 
 def build_eval_opponents(config: SelfPlayConfig, pool: OpponentPool) -> list[OpponentSpec]:
@@ -130,13 +162,24 @@ def aggregate_eval_metrics_for_opponents(
 def main(argv: list[str] | None = None) -> int:
     _require_torch()
     args = build_parser().parse_args(argv)
-    config = build_config(args)
-    output_dir = args.output_dir
+    resume_path = args.resume.resolve() if args.resume is not None else None
+    config = build_config(args) if resume_path is None else None
+    if resume_path is not None and not resume_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+    output_dir = resolve_output_dir(args, resume_path)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
 
-    rng = random.Random(config.seed)
-    torch.manual_seed(config.seed)
+    if resume_path is None:
+        assert config is not None
+        rng = random.Random(config.seed)
+        torch.manual_seed(config.seed)
+    else:
+        saved_header = torch.load(resume_path, map_location="cpu", weights_only=False)
+        saved_config = selfplay_config_from_dict(dict(saved_header["config"]))
+        config = config_for_resume(args, saved_config)
+        rng = random.Random(config.seed)
+        torch.manual_seed(config.seed)
 
     planner = UtilityPlanner()
     learner_model = build_model(config).to(torch.device(config.device))
@@ -146,9 +189,38 @@ def main(argv: list[str] | None = None) -> int:
     best_winrate = float("-inf")
     best_winrate_tiebreak = float("-inf")
     best_score_diff = float("-inf")
+    start_update = 1
+    if resume_path is not None:
+        payload = load_training_state(
+            resume_path,
+            model=learner_model,
+            optimizer=optimizer,
+            map_location=config.device,
+        )
+        pool_state = payload.get("opponent_pool")
+        if isinstance(pool_state, dict):
+            opponent_pool = OpponentPool.from_state(pool_state, max_size=config.opponent_pool_size)
+        best_winrate = float(payload.get("best_winrate", float("-inf")))
+        best_winrate_tiebreak = float(payload.get("best_winrate_tiebreak", payload.get("best_score_diff", float("-inf"))))
+        best_score_diff = float(payload.get("best_score_diff", float("-inf")))
+        python_random_state = payload.get("python_random_state")
+        if python_random_state is not None:
+            rng.setstate(python_random_state)
+        torch_rng_state = payload.get("torch_rng_state")
+        if torch_rng_state is not None:
+            torch.set_rng_state(torch_rng_state)
+        cuda_rng_state_all = payload.get("torch_cuda_rng_state_all")
+        if cuda_rng_state_all is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(cuda_rng_state_all)
+        start_update = int(payload.get("update_id", 0)) + 1
+        print(f"resuming_from={resume_path} start_update={start_update} total_updates={config.updates} device={config.device}")
     scripted_opponents = set(config.eval_opponents)
 
-    for update_id in range(1, config.updates + 1):
+    if start_update > config.updates:
+        print(f"resume checkpoint already reached update {start_update - 1}, nothing to do for updates={config.updates}")
+        return 0
+
+    for update_id in range(start_update, config.updates + 1):
         rollout_batch, match_summaries = build_rollout_batch(
             config=config,
             learner_model=learner_model,
@@ -246,13 +318,14 @@ def main(argv: list[str] | None = None) -> int:
             observation_dim=observation_dim(),
             action_dim=action_dim(),
             best_winrate=best_winrate,
+            best_winrate_tiebreak=best_winrate_tiebreak,
             best_score_diff=best_score_diff,
             rng=rng,
         )
 
         metrics_record = {
             "update": update_id,
-            "config": config.to_dict() if update_id == 1 else None,
+            "config": config.to_dict() if update_id == start_update else None,
             "rollout": {
                 "steps": update_stats.steps,
                 "episodes": update_stats.episodes,

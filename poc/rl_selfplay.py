@@ -47,6 +47,7 @@ class OpponentSpec:
     name: str
     selector: ActionSelector | None = None
     opponent_policy_name: str = "nearest_greedy"
+    kind: str = "scripted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,12 +214,18 @@ def sample_training_opponent(
     config: SelfPlayConfig,
     rng: random.Random,
 ) -> OpponentSpec:
+    scripted_opponents = config.training_scripted_opponents
+    scripted_fraction = min(max(config.training_scripted_fraction, 0.0), 1.0)
+    if scripted_opponents and rng.random() < scripted_fraction:
+        name = rng.choice(scripted_opponents)
+        return OpponentSpec(name=name, selector=None, opponent_policy_name=name, kind="scripted")
     snapshot = pool.sample_training_snapshot(rng)
     if snapshot is None:
-        return OpponentSpec(name="random_policy", selector=RandomMaskedPolicySelector(rng))
+        return OpponentSpec(name="random_policy", selector=RandomMaskedPolicySelector(rng), kind="random")
     return OpponentSpec(
         name=snapshot.name,
         selector=selector_from_snapshot(snapshot, config=config, greedy=False),
+        kind="self_play",
     )
 
 
@@ -351,6 +358,7 @@ def build_rollout_batch(
                 "scenario": scenario_name,
                 "seed": seed,
                 "opponent": opponent_spec.name,
+                "opponent_kind": opponent_spec.kind,
                 "summary": artifacts.result.summary,
                 "invalid_action_count": artifacts.invalid_action_count,
             }

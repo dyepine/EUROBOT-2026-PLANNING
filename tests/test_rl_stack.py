@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import math
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 from poc.actions import Action, ActionType
@@ -11,6 +13,7 @@ from poc.planner import UtilityPlanner
 from poc.rl_config import SelfPlayConfig
 from poc.rl_infra import DEFAULT_ACTION_SPACE, resolve_policy_action
 from poc.rl_ppo import PPORolloutItem, compute_gae_returns
+from poc.rl_train import config_for_resume, resolve_output_dir
 from poc.scenarios import build_scenario
 from poc.simulator import Simulator
 
@@ -111,6 +114,33 @@ class RLInfraTests(unittest.TestCase):
         self.assertEqual(len(returns), len(items))
         self.assertTrue(all(math.isfinite(value) for value in advantages))
         self.assertTrue(all(math.isfinite(value) for value in returns))
+
+    def test_resume_helpers_preserve_saved_config_and_override_selected_fields(self) -> None:
+        saved = SelfPlayConfig(
+            device="cuda",
+            updates=30,
+            dt=1.0,
+            training_scripted_fraction=0.4,
+            training_scripted_opponents=("nearest_greedy", "home_safe"),
+        )
+        args = SimpleNamespace(device="cpu", updates=50, output_dir=None)
+        resumed = config_for_resume(args, saved)
+        self.assertEqual(resumed.device, "cpu")
+        self.assertEqual(resumed.updates, 50)
+        self.assertEqual(resumed.dt, 1.0)
+        self.assertEqual(resumed.training_scripted_fraction, 0.4)
+        self.assertEqual(resumed.training_scripted_opponents, ("nearest_greedy", "home_safe"))
+
+    def test_resume_output_dir_defaults_to_checkpoint_parent(self) -> None:
+        args = SimpleNamespace(output_dir=None)
+        resolved = resolve_output_dir(args, Path("/tmp/ppo_run/training_state.pt"))
+        self.assertEqual(resolved, Path("/tmp/ppo_run"))
+
+    def test_new_scripted_opponents_and_scenarios_are_available(self) -> None:
+        self.assertEqual(build_opponent_policy("storage_first").name, "storage_first")
+        self.assertEqual(build_opponent_policy("home_safe").name, "home_safe")
+        self.assertEqual(build_scenario("storage_first_enemy").opponent_policy.name, "storage_first")
+        self.assertEqual(build_scenario("home_safe_enemy").opponent_policy.name, "home_safe")
 
 
 @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "PyTorch is not installed")

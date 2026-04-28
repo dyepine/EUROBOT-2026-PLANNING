@@ -76,6 +76,10 @@ def build_scenario(
         scenario_opponent_policy_name = "aggressive"
     elif name == "thermo_first_enemy":
         scenario_opponent_policy_name = "thermo_first"
+    elif name == "storage_first_enemy":
+        scenario_opponent_policy_name = "storage_first"
+    elif name == "home_safe_enemy":
+        scenario_opponent_policy_name = "home_safe"
     elif name != "baseline":
         raise ValueError(f"Unknown scenario: {name}")
 
@@ -112,4 +116,8 @@ def _scenario_description(name: str) -> str:
         return "Scenario with an aggressive enemy policy."
     if name == "thermo_first_enemy":
         return "Scenario where the enemy prioritizes the thermometer."
+    if name == "storage_first_enemy":
+        return "Scenario where the enemy prioritizes storage deposits."
+    if name == "home_safe_enemy":
+        return "Scenario where the enemy prefers safe home deposits."
     return "Baseline scenario with a nearest-greedy enemy."
