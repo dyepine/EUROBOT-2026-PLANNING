@@ -208,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
             rng.setstate(python_random_state)
         torch_rng_state = payload.get("torch_rng_state")
         if torch_rng_state is not None:
+            if not isinstance(torch_rng_state, torch.ByteTensor):
+                torch_rng_state = torch.as_tensor(torch_rng_state, dtype=torch.uint8)
             torch.set_rng_state(torch_rng_state)
         cuda_rng_state_all = payload.get("torch_cuda_rng_state_all")
         if cuda_rng_state_all is not None and torch.cuda.is_available():
