@@ -1,12 +1,15 @@
 # Eurobot 2026 Planning POC
 
-A lightweight strategy-planning sandbox for the Eurobot 2026 game.
+A lightweight research prototype for training a high-level planning policy for
+the Eurobot 2026 game.
 
-The project models a two-robot match at the semantic-action level: a grid/A*
-planner proposes legal actions, a simulator executes them as macro-actions, and
-an optional masked PPO loop can train a policy over the planner-generated action
-space. The code is intentionally small enough to inspect, run locally, and use
-as a research prototype.
+The repository is built around one question: can a policy learn to choose good
+semantic match actions while a classical planner handles geometry, legality, and
+route timing? The project models a two-robot match at the semantic-action level:
+a grid/A* planner proposes legal high-level actions, a simulator executes them
+as macro-actions, and a masked PPO loop trains a policy over the
+planner-generated action space. The code is intentionally small enough to
+inspect, run locally, and adapt for planning experiments.
 
 ## Demo
 
@@ -115,6 +118,32 @@ python -m poc.rl_dataset --output runs/rl_dataset.jsonl
 
 PyTorch is kept in the `rl` extra because the base simulator and planner do not
 need it.
+
+## Training Architecture
+
+The learned policy does not drive motors and does not plan paths directly. It
+chooses among planner-approved high-level actions such as picking a source,
+depositing carried items, attacking an opponent storage zone, using the
+thermometer, or starting the endgame routine.
+
+The training loop is split into explicit layers:
+
+- `UtilityPlanner` ranks currently legal semantic actions and attaches route
+  timing, expected reward, risk, and debug metadata.
+- `Simulator` advances the match as a gray-box system. At each decision point it
+  records a `DecisionObservation`, the ranked action list, the chosen domain
+  action, and the current score delta.
+- `rl_infra` encodes `DecisionObservation` into flat policy features, builds the
+  action mask from ranked actions, maps domain actions to policy tokens, and
+  constructs semi-MDP transitions after the match.
+- `rl_selfplay` runs masked PPO rollouts against scripted, randomized, and
+  self-play opponents. Rewards are score-delta based, with optional shaping for
+  successful thermometer usage and terminal win/draw/loss bonuses.
+- `rl_train`, `rl_eval`, and `rl_dataset` provide training, checkpoint
+  evaluation, and offline transition export CLIs.
+
+This keeps game rules and simulation behavior out of the neural policy code, and
+keeps RL rewards, masks, and transition bookkeeping out of the core simulator.
 
 ## Architecture Notes
 
