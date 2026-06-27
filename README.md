@@ -10,13 +10,9 @@ as a research prototype.
 
 ## Demo
 
-<video
-  src="https://raw.githubusercontent.com/dyepine/EUROBOT-2026-PLANNING/main/docs/assets/ppo_policy_demo.mp4"
-  controls
-  width="720"
-></video>
+<img src="docs/assets/ppo_policy_demo.gif" alt="PPO policy match animation" width="720">
 
-Repository copy: [PPO policy match animation](docs/assets/ppo_policy_demo.mp4).
+High-quality MP4 copy: [PPO policy match animation](docs/assets/ppo_policy_demo.mp4).
 
 ## What Is Included
 
