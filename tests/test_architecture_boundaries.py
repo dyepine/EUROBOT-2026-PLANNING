@@ -3,18 +3,18 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from poc.controllers import build_scripted_controller
-from poc.entities import Side
-from poc.rl_infra import build_rl_observation
-from poc.rules import (
+from poc.control.controllers import build_scripted_controller
+from poc.domain.entities import Side
+from poc.rl.encoder import build_rl_observation
+from poc.domain.rules import (
     deposit_can_accept_count,
     home_deposit_for_side,
     home_return_blocked,
     mars_has_pantry_credit,
     thermometer_lane_is_clear,
 )
-from poc.scenarios import build_scenario
-from poc.simulator import Simulator
+from poc.simulation.scenarios import build_scenario
+from poc.simulation.simulator import Simulator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,11 +32,18 @@ def _top_level_imports(module_path: str) -> set[str]:
 
 
 def test_core_architecture_boundaries_are_not_crossed() -> None:
-    assert "poc.rl_infra" not in _top_level_imports("poc/simulator.py")
-    assert "poc.policy_mapping" not in _top_level_imports("poc/simulator.py")
-    assert "poc.policy_mapping" not in _top_level_imports("poc/planner.py")
-    assert "poc.planner" not in _top_level_imports("poc/opponent_policy.py")
-    assert "poc.opponent_policy" not in _top_level_imports("poc/scenarios.py")
+    assert "poc.rl.infra" not in _top_level_imports("poc/simulation/simulator.py")
+    assert "poc.io.result_export" not in _top_level_imports("poc/simulation/simulator.py")
+    assert "poc.rl.policy_mapping" not in _top_level_imports("poc/simulation/simulator.py")
+    assert "poc.rl.policy_mapping" not in _top_level_imports("poc/planning/planner.py")
+    assert "poc.planning.planner" not in _top_level_imports("poc/control/opponent_policy.py")
+    assert "poc.control.opponent_policy" not in _top_level_imports("poc/simulation/scenarios.py")
+    assert "poc.rl.selfplay" not in _top_level_imports("poc/rl/encoder.py")
+    assert "poc.rl.model" not in _top_level_imports("poc/rl/encoder.py")
+    assert "poc.rl.ppo" not in _top_level_imports("poc/rl/encoder.py")
+    assert "poc.rl.transitions" not in _top_level_imports("poc/rl/action_space.py")
+    assert "poc.rl.workers" not in _top_level_imports("poc/rl/selectors.py")
+    assert "poc.rl.selfplay" not in _top_level_imports("poc/rl/workers.py")
 
 
 def test_rules_cover_thermometer_lane_home_capacity_and_mars_credit() -> None:

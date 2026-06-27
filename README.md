@@ -33,14 +33,15 @@ High-quality MP4 copy: [PPO policy match animation](docs/assets/ppo_policy_demo.
 
 ```text
 poc/
-  actions.py              # semantic action model
-  rules.py                # shared game-rule predicates and capacity checks
-  observations.py         # decision-point observations owned by simulation
-  controllers.py          # planner, scripted, and RL action-controller protocol
-  planner.py              # utility-ranked planner
-  simulator.py            # match execution, event history, and decision log
-  scoring.py              # scoring helpers
-  rl_*.py                 # observation/action space, PPO, self-play, CLI tools
+  domain/                 # actions, entities, GameState, rules, scoring
+  planning/               # utility planner, grid/A*, semantic map config
+  simulation/             # simulator, observations, scenarios, event history
+  control/                # controller protocol and scripted opponent policies
+  rl/                     # encoder, action space, transitions, PPO, workers
+  io/                     # result export, debug payloads, visualization
+  cli/                    # CLI implementations
+  main.py                 # compatibility CLI wrapper
+  rl_train.py             # compatibility CLI wrapper
   data/                   # map and semantic map configuration
 docs/
   planning_conditions.md  # planner and simulator behavior reference
@@ -49,7 +50,10 @@ notebooks/
   poc_results_overview.ipynb
   poc_rl_overview.ipynb
 tests/
-  test_rl_stack.py
+  test_rl_observations.py
+  test_rl_selfplay_workers.py
+  test_simulator_planner_stack.py
+  test_checkpoint_compat.py
 ```
 
 ## Quick Start
@@ -133,12 +137,13 @@ The training loop is split into explicit layers:
 - `Simulator` advances the match as a gray-box system. At each decision point it
   records a `DecisionObservation`, the ranked action list, the chosen domain
   action, and the current score delta.
-- `rl_infra` encodes `DecisionObservation` into flat policy features, builds the
-  action mask from ranked actions, maps domain actions to policy tokens, and
-  constructs semi-MDP transitions after the match.
-- `rl_selfplay` runs masked PPO rollouts against scripted, randomized, and
-  self-play opponents. Rewards are score-delta based, with optional shaping for
-  successful thermometer usage and terminal win/draw/loss bonuses.
+- `rl_encoder`, `rl_action_space`, and `rl_transitions` encode observations,
+  build masks, map domain actions to policy tokens, and construct semi-MDP
+  transitions after the match.
+- `rl_match`, `rl_workers`, and `rl_selfplay` run masked PPO rollouts against
+  scripted, randomized, and self-play opponents. Rewards are score-delta based,
+  with optional shaping for successful thermometer usage and terminal
+  win/draw/loss bonuses.
 - `rl_train`, `rl_eval`, and `rl_dataset` provide training, checkpoint
   evaluation, and offline transition export CLIs.
 

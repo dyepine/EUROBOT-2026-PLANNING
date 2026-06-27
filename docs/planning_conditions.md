@@ -6,11 +6,11 @@ This document describes the current behavior of the planner and simulator.
 When this document and the implementation disagree, the implementation is the
 source of truth:
 
-- `poc/planner.py`
-- `poc/simulator.py`
-- `poc/scoring.py`
-- `poc/config.py`
-- `poc/semantic_map.py`
+- `poc/planning/planner.py`
+- `poc/simulation/simulator.py`
+- `poc/domain/scoring.py`
+- `poc/domain/config.py`
+- `poc/planning/semantic_map.py`
 
 ## 1. Match Model
 

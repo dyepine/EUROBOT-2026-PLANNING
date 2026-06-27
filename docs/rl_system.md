@@ -6,11 +6,16 @@ This document describes the current reinforcement-learning stack in `poc/`.
 When this document and the implementation disagree, the implementation is the
 source of truth:
 
-- `poc/rl_infra.py`
-- `poc/rl_model.py`
-- `poc/rl_selfplay.py`
-- `poc/rl_train.py`
-- `poc/observations.py`
+- `poc/rl/encoder.py`
+- `poc/rl/action_space.py`
+- `poc/rl/transitions.py`
+- `poc/rl/match.py`
+- `poc/rl/workers.py`
+- `poc/rl/infra.py` compatibility facade
+- `poc/rl/model.py`
+- `poc/rl/selfplay.py`
+- `poc/cli/rl_train.py`
+- `poc/simulation/observations.py`
 
 ## 1. Architecture
 
@@ -169,7 +174,7 @@ The policy should not choose illegal actions. `MaskedPolicyValueNet` receives an
 
 ## 4. Policy Model
 
-`poc/rl_model.py` defines a compact actor-critic MLP:
+`poc/rl/model.py` defines a compact actor-critic MLP:
 
 - input: flattened `flat_features`;
 - backbone: `Linear + Tanh`;
@@ -181,8 +186,10 @@ This is a masked discrete PPO policy, not a candidate-pair `Q(s, a)` model.
 ## 5. Transition Semantics
 
 `Simulator.run()` returns a domain `MatchResult` with a `decision_log`, not
-RL-specific transitions. `poc.rl_infra.build_rl_transitions_from_match_result`
-builds `RLTransition` records in the RL layer.
+RL-specific transitions. `poc.rl.transitions.build_rl_transitions_from_match_result`
+builds `RLTransition` records in the RL layer. `poc.rl_infra` re-exports the
+same public names for compatibility, but new code should import the split
+modules directly.
 
 Each transition contains:
 
