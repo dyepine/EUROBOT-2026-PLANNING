@@ -10,7 +10,11 @@ as a research prototype.
 
 ## Demo
 
-<video src="docs/assets/ppo_policy_demo.mp4" controls width="720"></video>
+<video
+  src="https://raw.githubusercontent.com/dyepine/EUROBOT-2026-PLANNING/main/docs/assets/ppo_policy_demo.mp4"
+  controls
+  width="720"
+></video>
 
 Repository copy: [PPO policy match animation](docs/assets/ppo_policy_demo.mp4).
 
