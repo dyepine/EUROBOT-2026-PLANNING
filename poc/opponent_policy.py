@@ -7,7 +7,6 @@ import random
 from poc.actions import Action, ActionType
 from poc.entities import DepositType, Side
 from poc.game_state import GameState
-from poc.planner import UtilityPlanner
 from poc.scoring import deposit_max_count_for_side
 
 
@@ -58,8 +57,11 @@ def _weighted_choice(
 class OpponentPolicy:
     name: str
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         raise NotImplementedError
+
+    def choose_action(self, state: GameState, planner, side: Side) -> Action:
+        return self.choose_action_from_ranked(state, planner.rank_actions(state, side), side)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,8 +95,7 @@ class NearestGreedyPolicy(OpponentPolicy):
     def __init__(self) -> None:
         super().__init__(name="nearest_greedy")
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         robot = state.robot_for_side(side)
         if state.t >= state.endgame_config_for(side).main_pipeline_deadline:
             endgame = [action for action in ranked if action.type is ActionType.START_ENDGAME]
@@ -118,12 +119,11 @@ class AggressivePolicy(OpponentPolicy):
         super().__init__(name="aggressive")
         self._fallback = NearestGreedyPolicy()
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         attacks = [action for action in ranked if action.type is ActionType.ATTACK_DEPOSIT]
         if attacks:
             return max(attacks, key=lambda action: action.score)
-        return self._fallback.choose_action(state, planner, side)
+        return self._fallback.choose_action_from_ranked(state, ranked, side)
 
 
 class ThermoFirstPolicy(OpponentPolicy):
@@ -131,13 +131,12 @@ class ThermoFirstPolicy(OpponentPolicy):
         super().__init__(name="thermo_first")
         self._fallback = NearestGreedyPolicy()
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         if not state.thermometer.is_done_for_side(side):
             thermo = [action for action in ranked if action.type is ActionType.DO_THERMOMETER]
             if thermo:
                 return thermo[0]
-        return self._fallback.choose_action(state, planner, side)
+        return self._fallback.choose_action_from_ranked(state, ranked, side)
 
 
 class StorageFirstPolicy(OpponentPolicy):
@@ -145,8 +144,7 @@ class StorageFirstPolicy(OpponentPolicy):
         super().__init__(name="storage_first")
         self._fallback = NearestGreedyPolicy()
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         robot = state.robot_for_side(side)
         if robot.load > 0:
             deposits = [action for action in ranked if action.type is ActionType.DEPOSIT]
@@ -159,7 +157,7 @@ class StorageFirstPolicy(OpponentPolicy):
                 return max(storage_deposits, key=lambda action: (action.score, -action.expected_duration))
             if deposits:
                 return max(deposits, key=lambda action: (action.score, -action.expected_duration))
-        return self._fallback.choose_action(state, planner, side)
+        return self._fallback.choose_action_from_ranked(state, ranked, side)
 
 
 class HomeSafePolicy(OpponentPolicy):
@@ -167,8 +165,7 @@ class HomeSafePolicy(OpponentPolicy):
         super().__init__(name="home_safe")
         self._fallback = NearestGreedyPolicy()
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         robot = state.robot_for_side(side)
         if state.t >= state.endgame_config_for(side).main_pipeline_deadline:
             endgame = [action for action in ranked if action.type is ActionType.START_ENDGAME]
@@ -185,7 +182,7 @@ class HomeSafePolicy(OpponentPolicy):
                 return min(home_deposits, key=lambda action: action.expected_duration)
             if deposits:
                 return min(deposits, key=lambda action: action.expected_duration)
-        return self._fallback.choose_action(state, planner, side)
+        return self._fallback.choose_action_from_ranked(state, ranked, side)
 
 
 class FixedSequencePolicy(OpponentPolicy):
@@ -194,8 +191,7 @@ class FixedSequencePolicy(OpponentPolicy):
         self.steps = steps
         self._step_index = 0
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         while self._step_index < len(self.steps):
             step = self.steps[self._step_index]
             if self._step_is_done(step, state, side):
@@ -292,8 +288,7 @@ class UniformRandomPolicy(OpponentPolicy):
         super().__init__(name=name)
         self._rng = random.Random(0 if seed is None else seed)
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         interesting = [action for action in ranked if action.type is not ActionType.WAIT]
         return self._rng.choice(interesting or ranked)
 
@@ -312,8 +307,7 @@ class StochasticPlannerPolicy(OpponentPolicy):
         self.temperature = temperature
         self.top_k = max(1, top_k)
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         interesting = [action for action in ranked if action.type is not ActionType.WAIT]
         candidates = (interesting or ranked)[: self.top_k]
         adjusted = [(action, action.score) for action in candidates]
@@ -373,8 +367,7 @@ class WeightedStochasticPolicy(OpponentPolicy):
             adjusted += self.endgame_bias
         return adjusted
 
-    def choose_action(self, state: GameState, planner: UtilityPlanner, side: Side) -> Action:
-        ranked = planner.rank_actions(state, side)
+    def choose_action_from_ranked(self, state: GameState, ranked: list[Action], side: Side) -> Action:
         interesting = [action for action in ranked if action.type is not ActionType.WAIT]
         candidates = (interesting or ranked)[: self.top_k]
         adjusted = [(action, self._adjusted_score(state, side, action)) for action in candidates]

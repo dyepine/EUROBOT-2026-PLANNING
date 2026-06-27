@@ -7,19 +7,14 @@ from pathlib import Path
 
 from poc.entities import Side
 from poc.planner import UtilityPlanner
-from poc.rl_infra import transition_to_record
+from poc.controllers import build_scripted_controller
+from poc.registries import DATASET_SCENARIO_NAMES, SCRIPTED_CONTROLLER_NAMES
+from poc.rl_infra import build_rl_transitions_from_match_result, transition_to_record
 from poc.scenarios import build_scenario
 from poc.simulator import Simulator
 
-DEFAULT_SCENARIOS = (
-    "baseline",
-    "delayed_sources",
-    "aggressive_enemy",
-    "thermo_first_enemy",
-    "storage_first_enemy",
-    "home_safe_enemy",
-)
-DEFAULT_OPPONENT_POLICIES = ("nearest_greedy", "aggressive", "thermo_first", "storage_first", "home_safe")
+DEFAULT_SCENARIOS = DATASET_SCENARIO_NAMES
+DEFAULT_OPPONENT_POLICIES = SCRIPTED_CONTROLLER_NAMES
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,13 +101,14 @@ def generate_rl_dataset(
             simulator = Simulator(
                 state=scenario.game_state,
                 scenario_name=scenario.name,
-                opponent_policy=scenario.opponent_policy,
+                opponent_controller=build_scripted_controller(spec.opponent_policy_name),
                 planner=planner,
                 dt=spec.dt,
             )
             result = simulator.run()
             run_transition_count = 0
-            for transition_index, transition in enumerate(result.rl_transitions):
+            transitions = build_rl_transitions_from_match_result(result)
+            for transition_index, transition in enumerate(transitions):
                 record = transition_to_record(transition)
                 record["match"] = {
                     "match_id": spec.match_id,

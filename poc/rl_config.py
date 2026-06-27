@@ -51,21 +51,7 @@ class PPOConfig:
 
 @dataclass(frozen=True, slots=True)
 class SelfPlayConfig:
-    seed: int = 1
-    device: str = "cpu"
-    steps_per_update: int = 1024
-    matches_per_update: int = 16
-    epochs_per_update: int = 4
-    minibatch_size: int = 256
-    gamma: float = 0.99
-    gae_lambda: float = 0.95
-    clip_epsilon: float = 0.2
-    entropy_coef: float = 0.01
-    value_coef: float = 0.5
-    max_grad_norm: float = 0.5
-    learning_rate: float = 3e-4
-    side: Side = Side.BLUE
-    dt: float = 0.5
+    ppo: PPOConfig = field(default_factory=PPOConfig)
     thermometer_reward_bonus: float = 3.0
     terminal_win_bonus: float = 2.0
     terminal_draw_bonus: float = 0.0
@@ -74,11 +60,6 @@ class SelfPlayConfig:
     enemy_velocity_noise_std_mps: float = 0.01
     enemy_velocity_self_motion_leak_fraction: float = 0.0
     enemy_velocity_self_motion_leak_duration_s: float = 0.0
-    opponent_pool_size: int = 8
-    checkpoint_every_updates: int = 1
-    eval_every_updates: int = 5
-    updates: int = 100
-    hidden_sizes: tuple[int, ...] = (256, 256, 256)
     rollout_workers: int = 10
     eval_workers: int = 10
     training_scenarios: tuple[str, ...] = field(default_factory=lambda: DEFAULT_TRAINING_SCENARIOS)
@@ -88,39 +69,14 @@ class SelfPlayConfig:
     eval_opponents: tuple[str, ...] = field(default_factory=lambda: DEFAULT_EVAL_OPPONENTS)
     eval_matches_per_opponent: int = 4
 
-    def ppo_config(self) -> PPOConfig:
-        return PPOConfig(
-            seed=self.seed,
-            device=self.device,
-            steps_per_update=self.steps_per_update,
-            matches_per_update=self.matches_per_update,
-            epochs_per_update=self.epochs_per_update,
-            minibatch_size=self.minibatch_size,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            clip_epsilon=self.clip_epsilon,
-            entropy_coef=self.entropy_coef,
-            value_coef=self.value_coef,
-            max_grad_norm=self.max_grad_norm,
-            learning_rate=self.learning_rate,
-            side=self.side,
-            dt=self.dt,
-            opponent_pool_size=self.opponent_pool_size,
-            checkpoint_every_updates=self.checkpoint_every_updates,
-            eval_every_updates=self.eval_every_updates,
-            updates=self.updates,
-            hidden_sizes=self.hidden_sizes,
-        )
-
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
-        payload["side"] = self.side.value
-        payload["ppo"] = self.ppo_config().to_dict()
+        payload["ppo"] = self.ppo.to_dict()
         return payload
 
 
-def selfplay_config_from_dict(payload: dict[str, object]) -> SelfPlayConfig:
-    return SelfPlayConfig(
+def _ppo_config_from_payload(payload: dict[str, object]) -> PPOConfig:
+    return PPOConfig(
         seed=int(payload.get("seed", 1)),
         device=str(payload.get("device", "cpu")),
         steps_per_update=int(payload.get("steps_per_update", 1024)),
@@ -134,8 +90,20 @@ def selfplay_config_from_dict(payload: dict[str, object]) -> SelfPlayConfig:
         value_coef=float(payload.get("value_coef", 0.5)),
         max_grad_norm=float(payload.get("max_grad_norm", 0.5)),
         learning_rate=float(payload.get("learning_rate", 3e-4)),
-        side=Side(str(payload.get("side", Side.BLUE.value))),
+        side=payload.get("side") if isinstance(payload.get("side"), Side) else Side(str(payload.get("side", Side.BLUE.value))),
         dt=float(payload.get("dt", 0.5)),
+        opponent_pool_size=int(payload.get("opponent_pool_size", 8)),
+        checkpoint_every_updates=int(payload.get("checkpoint_every_updates", 1)),
+        eval_every_updates=int(payload.get("eval_every_updates", 5)),
+        updates=int(payload.get("updates", 100)),
+        hidden_sizes=tuple(int(value) for value in payload.get("hidden_sizes", (256, 256, 256))),
+    )
+
+
+def selfplay_config_from_dict(payload: dict[str, object]) -> SelfPlayConfig:
+    ppo_payload = dict(payload.get("ppo", {}))
+    return SelfPlayConfig(
+        ppo=_ppo_config_from_payload(ppo_payload),
         thermometer_reward_bonus=float(payload.get("thermometer_reward_bonus", 3.0)),
         terminal_win_bonus=float(payload.get("terminal_win_bonus", 2.0)),
         terminal_draw_bonus=float(payload.get("terminal_draw_bonus", 0.0)),
@@ -144,11 +112,6 @@ def selfplay_config_from_dict(payload: dict[str, object]) -> SelfPlayConfig:
         enemy_velocity_noise_std_mps=float(payload.get("enemy_velocity_noise_std_mps", 0.01)),
         enemy_velocity_self_motion_leak_fraction=float(payload.get("enemy_velocity_self_motion_leak_fraction", 0.0)),
         enemy_velocity_self_motion_leak_duration_s=float(payload.get("enemy_velocity_self_motion_leak_duration_s", 0.0)),
-        opponent_pool_size=int(payload.get("opponent_pool_size", 8)),
-        checkpoint_every_updates=int(payload.get("checkpoint_every_updates", 1)),
-        eval_every_updates=int(payload.get("eval_every_updates", 5)),
-        updates=int(payload.get("updates", 100)),
-        hidden_sizes=tuple(int(value) for value in payload.get("hidden_sizes", (256, 256, 256))),
         rollout_workers=int(payload.get("rollout_workers", 10)),
         eval_workers=int(payload.get("eval_workers", 10)),
         training_scenarios=tuple(str(value) for value in payload.get("training_scenarios", DEFAULT_TRAINING_SCENARIOS)),

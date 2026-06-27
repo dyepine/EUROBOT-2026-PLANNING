@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from poc.actions import Action, ActionType
 from poc.endgame import EndgameConfig
@@ -13,23 +14,11 @@ from poc.entities import DepositType, PushState, Side, SourceState
 from poc.external_events import EventType, apply_external_event
 from poc.game_state import GameState
 from poc.geometry import advance_along_path, distance, interpolate, point_to_segment_distance, segment_to_segment_distance
-from poc.opponent_policy import OpponentPolicy
-from poc.planner import PlanningDecision, UtilityPlanner
-from poc.policy_mapping import (
-    normalized_action_label,
-    normalized_target_id,
-    policy_metadata_for_deposit,
-    policy_metadata_for_source,
-)
-from poc.rl_infra import (
-    DEFAULT_ACTION_SPACE,
-    RLObservationConfig,
-    RLPolicyStep,
-    RLTransition,
-    build_rl_observation,
-    build_rl_policy_step,
-    save_transition_dataset,
-)
+from poc.controllers import ActionController
+from poc.debug import planning_debug_payload
+from poc.observations import DecisionObservation, PreviousTickObservation, RobotObservation
+from poc.planner import UtilityPlanner
+from poc.rules import home_deposit_for_side, mars_has_pantry_credit, thermometer_lane_is_clear
 from poc.scoring import deposit_max_count_for_side, deposit_zone_points, home_remaining_capacity
 
 
@@ -55,11 +44,19 @@ class ActionLogEntry:
     time: float
     side: Side
     action: str
-    policy_action: str
     target_id: int | None
-    policy_target_id: str | None
     expected_duration: float
     score: float
+
+
+@dataclass(slots=True)
+class DecisionLogEntry:
+    time: float
+    side: Side
+    observation: DecisionObservation
+    ranked_actions: tuple[Action, ...]
+    chosen_action: Action
+    score_diff_before: float
 
 
 @dataclass(slots=True)
@@ -92,28 +89,13 @@ class ActiveAction:
     completed_phases: int = 0
 
 
-@dataclass(frozen=True, slots=True)
-class RobotTickState:
-    position: tuple[float, float]
-
-
-@dataclass(frozen=True, slots=True)
-class TickStateSnapshot:
-    t: float
-    blue_robot: RobotTickState
-    yellow_robot: RobotTickState
-
-    def robot_for_side(self, side: Side) -> RobotTickState:
-        return self.blue_robot if side is Side.BLUE else self.yellow_robot
-
-
 @dataclass(slots=True)
 class MatchResult:
     scenario_name: str
     summary: dict[str, float | int | bool | str]
     history: list[HistoryEntry]
     action_log: list[ActionLogEntry]
-    rl_transitions: list[RLTransition]
+    decision_log: list[DecisionLogEntry]
     planner_debug: list[dict[str, object]]
     events: list[SimulationEvent]
     field_size: tuple[float, float]
@@ -126,33 +108,9 @@ class MatchResult:
 
 
 @dataclass(slots=True)
-class PendingRLTransition:
-    time: float
-    step: RLPolicyStep
-    chosen_action: str
-    chosen_action_index: int
-    score_diff_before: float
-
-
-@dataclass(slots=True)
 class StoppedMarsState:
     delay_duration: float = 0.0
     blocked_since: float | None = None
-
-
-class ActionSelector(Protocol):
-    name: str
-
-    def select_action(
-        self,
-        *,
-        state: GameState,
-        planner: UtilityPlanner,
-        side: Side,
-        ranked_actions: list[Action],
-        policy_step: RLPolicyStep,
-    ) -> Action:
-        ...
 
 
 class Simulator:
@@ -160,38 +118,27 @@ class Simulator:
         self,
         state: GameState,
         scenario_name: str,
-        opponent_policy: OpponentPolicy,
         planner: UtilityPlanner | None = None,
         dt: float = 0.5,
-        action_selectors: dict[Side, ActionSelector] | None = None,
-        rl_observation_config: RLObservationConfig | None = None,
-        thermometer_reward_bonus: float = 3.0,
-        terminal_win_bonus: float = 2.0,
-        terminal_draw_bonus: float = 0.0,
-        terminal_loss_bonus: float = -2.0,
+        controllers: dict[Side, ActionController] | None = None,
+        opponent_controller: ActionController | None = None,
     ) -> None:
         self.state = state
         self.scenario_name = scenario_name
-        self.opponent_policy = opponent_policy
         self.planner = planner or UtilityPlanner()
         self.dt = dt
-        self.action_selectors = dict(action_selectors or {})
-        self.rl_observation_config = rl_observation_config or RLObservationConfig()
-        self.thermometer_reward_bonus = thermometer_reward_bonus
-        self.terminal_win_bonus = terminal_win_bonus
-        self.terminal_draw_bonus = terminal_draw_bonus
-        self.terminal_loss_bonus = terminal_loss_bonus
+        self.controllers = dict(controllers or {})
+        self.opponent_controller = opponent_controller
         self._event_index = 0
         self._active_actions: dict[Side, ActiveAction | None] = {Side.BLUE: None, Side.YELLOW: None}
         self._history: list[HistoryEntry] = []
         self._action_log: list[ActionLogEntry] = []
-        self._rl_transitions: list[RLTransition] = []
-        self._pending_rl: dict[Side, PendingRLTransition | None] = {Side.BLUE: None, Side.YELLOW: None}
+        self._decision_log: list[DecisionLogEntry] = []
         self._planner_debug: list[dict[str, object]] = []
         self._events: list[SimulationEvent] = []
         self._replan_count = 0
         self._lost_target_count = 0
-        self._previous_tick_state: TickStateSnapshot | None = None
+        self._previous_tick_state: PreviousTickObservation | None = None
         self._last_runtime_replan_time_by_side: dict[Side, float] = {Side.BLUE: -1e9, Side.YELLOW: -1e9}
         self._stopped_mars_by_name: dict[str, StoppedMarsState] = {}
         self._mars_collision_pairs: set[tuple[Side, str]] = set()
@@ -217,24 +164,17 @@ class Simulator:
             self._update_active_action(side)
         self._update_mars_interactions()
         self._finalize_match()
-        self._finalize_rl_transitions()
         return MatchResult(
             scenario_name=self.scenario_name,
             summary=self._build_summary(),
             history=self._history,
             action_log=self._action_log,
-            rl_transitions=self._rl_transitions,
+            decision_log=self._decision_log,
             planner_debug=self._planner_debug,
             events=self._events,
             field_size=self.state.field_size,
-            sources={
-                source_id: _serialize_with_policy_metadata(source, policy_metadata_for_source(source_id))
-                for source_id, source in self.state.sources.items()
-            },
-            deposits={
-                deposit_id: _serialize_with_policy_metadata(deposit, policy_metadata_for_deposit(deposit_id))
-                for deposit_id, deposit in self.state.deposits.items()
-            },
+            sources={source_id: _serialize(source) for source_id, source in self.state.sources.items()},
+            deposits={deposit_id: _serialize(deposit) for deposit_id, deposit in self.state.deposits.items()},
             thermometer=_serialize(self.state.thermometer),
             endgame={side.value: _serialize(config) for side, config in self.state.endgame_by_side.items()},
             mars={
@@ -323,19 +263,7 @@ class Simulator:
         self.state.thermometer_last_state_change_time = float(self.state.t)
 
     def _thermometer_lane_is_clear_for_side(self, side: Side) -> bool:
-        blocking_source_id = self.state.thermometer.blocking_source_id_for_side(side)
-        source = self.state.sources.get(blocking_source_id)
-        blocking_source_clear = (
-            source is None
-            or source.state is SourceState.EMPTY
-            or source.available_items <= 0
-        )
-        zone_10 = self.state.deposits.get(10)
-        zone_10_clear = zone_10 is None or zone_10.total_items() == 0
-        blocking_deposit_id = self.state.thermometer.blocking_deposit_id_for_side(side)
-        blocking_deposit = self.state.deposits.get(blocking_deposit_id)
-        blocking_deposit_clear = blocking_deposit is None or blocking_deposit.total_items() == 0
-        return blocking_source_clear and zone_10_clear and blocking_deposit_clear
+        return thermometer_lane_is_clear(self.state, side)
 
     def _refresh_thermometer_lane_clear_tracking(self, *, force: bool = False) -> None:
         for side in (Side.BLUE, Side.YELLOW):
@@ -345,11 +273,11 @@ class Simulator:
             if force or current != previous:
                 self.state.thermometer_lane_clear_change_time_by_side[side] = float(self.state.t)
 
-    def _capture_tick_state_snapshot(self) -> TickStateSnapshot:
-        return TickStateSnapshot(
+    def _capture_tick_state_snapshot(self) -> PreviousTickObservation:
+        return PreviousTickObservation(
             t=float(self.state.t),
-            blue_robot=RobotTickState(position=self.state.robot_for_side(Side.BLUE).position),
-            yellow_robot=RobotTickState(position=self.state.robot_for_side(Side.YELLOW).position),
+            blue_robot=RobotObservation(position=self.state.robot_for_side(Side.BLUE).position),
+            yellow_robot=RobotObservation(position=self.state.robot_for_side(Side.YELLOW).position),
         )
 
     def _update_observed_speed_tracking(self) -> None:
@@ -532,57 +460,49 @@ class Simulator:
         return waypoints[next_waypoint_index:]
 
     def _assign_next_action(self, side: Side) -> None:
-        selector = self.action_selectors.get(side)
-        if side is self.state.our_side and selector is None:
-            decision = self.planner.plan(self.state, side)
-            action = decision.chosen_action
-            ranked_actions = decision.ranked_actions
-            self._planner_debug.append(decision.debug_payload(self.state.t, side))
-        else:
-            ranked_actions = self.planner.rank_actions(self.state, side)
-            policy_step = build_rl_policy_step(
-                self.state,
-                side,
-                ranked_actions=ranked_actions,
-                previous_state=self._previous_tick_state,
-                dt=self.dt,
-                config=self.rl_observation_config,
-                action_space=DEFAULT_ACTION_SPACE,
-            )
-            if selector is None:
-                action = self.opponent_policy.choose_action(self.state, self.planner, side)
-            else:
-                action = selector.select_action(
-                    state=self.state,
-                    planner=self.planner,
-                    side=side,
-                    ranked_actions=ranked_actions,
-                    policy_step=policy_step,
-                )
-                if side is self.state.our_side:
-                    decision = PlanningDecision(
+        controller = self.controllers.get(side)
+        if controller is None and side is not self.state.our_side:
+            controller = self.opponent_controller
+
+        ranked_actions = self.planner.rank_actions(self.state, side)
+        if not ranked_actions:
+            return
+        observation = self._build_decision_observation(side, ranked_actions)
+
+        if controller is None:
+            action = ranked_actions[0]
+            if side is self.state.our_side:
+                self._planner_debug.append(
+                    planning_debug_payload(
+                        time=self.state.t,
+                        side=side,
                         chosen_action=action,
                         ranked_actions=ranked_actions,
-                        reason=f"selector:{selector.name}",
+                        reason="planner",
                     )
-                    self._planner_debug.append(decision.debug_payload(self.state.t, side))
-        if side is self.state.our_side and selector is None:
-            policy_step = build_rl_policy_step(
-                self.state,
-                side,
-                ranked_actions=ranked_actions,
-                previous_state=self._previous_tick_state,
-                dt=self.dt,
-                config=self.rl_observation_config,
-                action_space=DEFAULT_ACTION_SPACE,
+                )
+        else:
+            action = controller.select_action(observation=observation, ranked_actions=ranked_actions)
+            if side is self.state.our_side:
+                self._planner_debug.append(
+                    planning_debug_payload(
+                        time=self.state.t,
+                        side=side,
+                        chosen_action=action,
+                        ranked_actions=ranked_actions,
+                        reason=f"controller:{controller.name}",
+                    )
+                )
+
+        self._decision_log.append(
+            DecisionLogEntry(
+                time=round(self.state.t, 6),
+                side=side,
+                observation=observation,
+                ranked_actions=observation.ranked_actions,
+                chosen_action=deepcopy(action),
+                score_diff_before=self._score_diff_for_side(side),
             )
-        chosen_policy_action = normalized_action_label(action, side)
-        chosen_policy_action_index = DEFAULT_ACTION_SPACE.encode(chosen_policy_action)
-        self._finalize_pending_rl_transition(
-            side,
-            next_step=policy_step,
-            score_diff_after=self._score_diff_for_side(side),
-            done=False,
         )
 
         active_action = self._activate_action(side, action)
@@ -603,19 +523,19 @@ class Simulator:
                 time=self.state.t,
                 side=side,
                 action=action.label,
-                policy_action=normalized_action_label(action, side),
                 target_id=action.target_id,
-                policy_target_id=normalized_target_id(action.target_id, action.type, side),
                 expected_duration=round(action.expected_duration, 3),
                 score=round(action.score, 3),
             )
         )
-        self._pending_rl[side] = PendingRLTransition(
-            time=round(self.state.t, 6),
-            step=policy_step,
-            chosen_action=chosen_policy_action,
-            chosen_action_index=chosen_policy_action_index,
-            score_diff_before=self._score_diff_for_side(side),
+
+    def _build_decision_observation(self, side: Side, ranked_actions: list[Action]) -> DecisionObservation:
+        return DecisionObservation(
+            state=deepcopy(self.state),
+            side=side,
+            ranked_actions=tuple(deepcopy(ranked_actions)),
+            previous_state=deepcopy(self._previous_tick_state),
+            dt=self.dt,
         )
 
     def _activate_action(self, side: Side, action: Action) -> ActiveAction:
@@ -1304,7 +1224,7 @@ class Simulator:
         final_distance = distance(robot.position, config.final_home_point)
         if final_distance > config.home_partial_tolerance:
             return
-        home_deposit = self._home_deposit_for_side(side)
+        home_deposit = home_deposit_for_side(self.state, side)
         if home_deposit is None:
             return
         before_blue = deposit_zone_points(home_deposit, Side.BLUE)
@@ -1323,22 +1243,16 @@ class Simulator:
         pantry_points = 0
         arrived_count = 0
         for mars in marses:
-            if self._mars_has_arrived(mars, self.state.T_end) and not self._mars_collided(mars):
+            if mars_has_pantry_credit(
+                arrived=self._mars_has_arrived(mars, self.state.T_end),
+                collided=self._mars_collided(mars),
+            ):
                 pantry_points += config.score.mars_pantry_points
                 arrived_count += 1
         if pantry_points:
             self.state.add_score(side, pantry_points)
         if arrived_count == len(marses):
             self.state.add_score(side, config.score.mars_all_eating_bonus)
-
-    def _home_deposit_for_side(self, side: Side):
-        for deposit in self.state.deposits.values():
-            if deposit.kind is DepositType.HOME and deposit.owner is side:
-                return deposit
-        return None
-
-    def _mars_collides_with_robot(self, mars) -> bool:
-        return self._mars_collided(mars)
 
     def _build_summary(self) -> dict[str, float | int | bool | str]:
         our_side = self.state.our_side
@@ -1361,19 +1275,31 @@ class Simulator:
             "our_mars_pantry_count": sum(
                 1
                 for mars in self.state.mars_by_side.get(our_side, ())
-                if self._mars_has_arrived(mars, self.state.T_end) and not self._mars_collides_with_robot(mars)
+                if mars_has_pantry_credit(
+                    arrived=self._mars_has_arrived(mars, self.state.T_end),
+                    collided=self._mars_collided(mars),
+                )
             ),
             "enemy_mars_pantry_count": sum(
                 1
                 for mars in self.state.mars_by_side.get(enemy_side, ())
-                if self._mars_has_arrived(mars, self.state.T_end) and not self._mars_collides_with_robot(mars)
+                if mars_has_pantry_credit(
+                    arrived=self._mars_has_arrived(mars, self.state.T_end),
+                    collided=self._mars_collided(mars),
+                )
             ),
             "our_mars_all_eating": all(
-                self._mars_has_arrived(mars, self.state.T_end) and not self._mars_collides_with_robot(mars)
+                mars_has_pantry_credit(
+                    arrived=self._mars_has_arrived(mars, self.state.T_end),
+                    collided=self._mars_collided(mars),
+                )
                 for mars in self.state.mars_by_side.get(our_side, ())
             ) if self.state.mars_by_side.get(our_side, ()) else False,
             "enemy_mars_all_eating": all(
-                self._mars_has_arrived(mars, self.state.T_end) and not self._mars_collides_with_robot(mars)
+                mars_has_pantry_credit(
+                    arrived=self._mars_has_arrived(mars, self.state.T_end),
+                    collided=self._mars_collided(mars),
+                )
                 for mars in self.state.mars_by_side.get(enemy_side, ())
             ) if self.state.mars_by_side.get(enemy_side, ()) else False,
             "our_mars_collision_count": sum(
@@ -1389,80 +1315,15 @@ class Simulator:
     def _score_diff_for_side(self, side: Side) -> float:
         return float(self.state.score_for_side(side) - self.state.score_for_side(side.opponent()))
 
-    def _finalize_pending_rl_transition(
-        self,
-        side: Side,
-        next_step: RLPolicyStep,
-        score_diff_after: float,
-        done: bool,
-    ) -> None:
-        pending = self._pending_rl[side]
-        if pending is None:
-            return
-        reward = score_diff_after - pending.score_diff_before
-        if pending.chosen_action == "THERMOMETER" and self.state.thermometer.is_done_for_side(side):
-            reward += self.thermometer_reward_bonus
-        if done:
-            reward += self._terminal_bonus_for_side(side)
-        self._rl_transitions.append(
-            RLTransition(
-                side=side.value,
-                time=pending.time,
-                chosen_action=pending.chosen_action,
-                chosen_action_index=pending.chosen_action_index,
-                action_mask=pending.step.action_mask,
-                observation=pending.step.observation,
-                reward=reward,
-                next_observation=next_step.observation,
-                next_action_mask=next_step.action_mask,
-                done=done,
-                score_diff_before=pending.score_diff_before,
-                score_diff_after=score_diff_after,
-            )
-        )
-        self._pending_rl[side] = None
-
-    def _terminal_bonus_for_side(self, side: Side) -> float:
-        score_diff = self._score_diff_for_side(side)
-        if score_diff > 0.0:
-            return self.terminal_win_bonus
-        if score_diff < 0.0:
-            return self.terminal_loss_bonus
-        return self.terminal_draw_bonus
-
     def _controller_name_for_side(self, side: Side) -> str:
-        selector = self.action_selectors.get(side)
-        if selector is not None:
-            return selector.name
+        controller = self.controllers.get(side)
+        if controller is not None:
+            return controller.name
         if side is self.state.our_side:
             return "planner"
-        return self.opponent_policy.name
-
-    def _finalize_rl_transitions(self) -> None:
-        zero_mask = tuple(0 for _ in DEFAULT_ACTION_SPACE.tokens)
-        for side in (Side.BLUE, Side.YELLOW):
-            pending = self._pending_rl[side]
-            if pending is None:
-                continue
-            terminal_observation = build_rl_observation(
-                self.state,
-                side,
-                previous_state=self._previous_tick_state,
-                dt=self.dt,
-                config=self.rl_observation_config,
-            )
-            terminal_step = RLPolicyStep(
-                observation=terminal_observation,
-                action_space=DEFAULT_ACTION_SPACE,
-                action_mask=zero_mask,
-                candidates=(),
-            )
-            self._finalize_pending_rl_transition(
-                side,
-                next_step=terminal_step,
-                score_diff_after=self._score_diff_for_side(side),
-                done=True,
-            )
+        if self.opponent_controller is not None:
+            return self.opponent_controller.name
+        return "planner"
 
 
 def save_result(result: MatchResult, path: str | Path) -> Path:
@@ -1470,15 +1331,6 @@ def save_result(result: MatchResult, path: str | Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(_serialize(result), indent=2), encoding="utf-8")
     return output
-
-
-def load_result(path: str | Path) -> dict[str, Any]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def save_rl_dataset(result: MatchResult, path: str | Path, side: Side | None = None) -> Path:
-    transitions = result.rl_transitions if side is None else [item for item in result.rl_transitions if item.side == side.value]
-    return save_transition_dataset(transitions, path)
 
 
 def _serialize(value: Any) -> Any:
@@ -1491,13 +1343,6 @@ def _serialize(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_serialize(item) for item in value]
     return value
-
-
-def _serialize_with_policy_metadata(value: Any, policy_metadata: dict[str, object]) -> dict[str, Any]:
-    serialized = _serialize(value)
-    assert isinstance(serialized, dict)
-    serialized.update(_serialize(policy_metadata))
-    return serialized
 
 
 def _waypoint_tuple(value: Any, fallback: tuple[tuple[float, float], ...]) -> tuple[tuple[float, float], ...]:

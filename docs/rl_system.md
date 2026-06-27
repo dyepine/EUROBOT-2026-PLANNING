@@ -10,16 +10,19 @@ source of truth:
 - `poc/rl_model.py`
 - `poc/rl_selfplay.py`
 - `poc/rl_train.py`
-- `poc/simulator.py`
+- `poc/observations.py`
 
 ## 1. Architecture
 
 The RL loop is deliberately built on top of the symbolic planner:
 
 - the planner generates legal semantic actions;
-- those actions are converted into an `action_mask`;
+- the simulator builds a `DecisionObservation` at each decision point;
+- the RL encoder converts that observation and ranked actions into an
+  `action_mask`;
 - the policy selects an action from a fixed discrete action space;
 - the simulator executes the selected action as a semi-MDP macro-action;
+- the RL adapter builds transitions from decision observations and score deltas;
 - training uses masked discrete PPO.
 
 The policy does not control low-level motion and does not generate routes. It
@@ -27,7 +30,12 @@ chooses among planner-approved semantic candidates.
 
 ## 2. Observation
 
-`build_rl_observation(...)` builds an `RLObservation` with:
+The simulator owns decision-point context. It records `DecisionObservation`
+snapshots containing the current `GameState`, side perspective, ranked actions,
+previous tick snapshot, and `dt`.
+
+`build_rl_observation(...)` encodes a `DecisionObservation` into an
+`RLObservation` with:
 
 - `perspective`
 - `global_features`
@@ -172,7 +180,9 @@ This is a masked discrete PPO policy, not a candidate-pair `Q(s, a)` model.
 
 ## 5. Transition Semantics
 
-`Simulator` records `rl_transitions` at decision points.
+`Simulator.run()` returns a domain `MatchResult` with a `decision_log`, not
+RL-specific transitions. `poc.rl_infra.build_rl_transitions_from_match_result`
+builds `RLTransition` records in the RL layer.
 
 Each transition contains:
 
@@ -201,9 +211,9 @@ Base reward:
 
 Terminal bonus:
 
-- `+20` for a win;
+- `+2` for a win;
 - `0` for a draw;
-- `-20` for a loss.
+- `-2` for a loss.
 
 Optional shaping:
 

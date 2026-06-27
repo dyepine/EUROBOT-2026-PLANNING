@@ -8,6 +8,12 @@ an optional masked PPO loop can train a policy over the planner-generated action
 space. The code is intentionally small enough to inspect, run locally, and use
 as a research prototype.
 
+## Demo
+
+<video src="docs/assets/ppo_policy_demo.mp4" controls width="720"></video>
+
+Repository copy: [PPO policy match animation](docs/assets/ppo_policy_demo.mp4).
+
 ## What Is Included
 
 - 2D match simulator with scoring, endgame return logic, and simplified Mars
@@ -25,8 +31,11 @@ as a research prototype.
 ```text
 poc/
   actions.py              # semantic action model
+  rules.py                # shared game-rule predicates and capacity checks
+  observations.py         # decision-point observations owned by simulation
+  controllers.py          # planner, scripted, and RL action-controller protocol
   planner.py              # utility-ranked planner
-  simulator.py            # match execution and event history
+  simulator.py            # match execution, event history, and decision log
   scoring.py              # scoring helpers
   rl_*.py                 # observation/action space, PPO, self-play, CLI tools
   data/                   # map and semantic map configuration
@@ -106,6 +115,18 @@ python -m poc.rl_dataset --output runs/rl_dataset.jsonl
 
 PyTorch is kept in the `rl` extra because the base simulator and planner do not
 need it.
+
+## Architecture Notes
+
+`GameState` is the single match state. The simulator acts as the decision-point
+boundary: it advances the match, builds `DecisionObservation` snapshots, and
+records domain actions. RL code then encodes those observations into flat
+features, masks, rewards, and transitions outside the simulator.
+
+Shared game predicates live in `poc.rules`; policy-token labels and debug rows
+live outside planner/simulator core code. Scenarios build initial state and
+metadata, while controller factories choose scripted, planner-backed, or RL
+action selection.
 
 ## Current Modeling Scope
 

@@ -6,11 +6,6 @@ import json
 from pathlib import Path
 import random
 
-try:
-    import torch
-except ModuleNotFoundError:  # pragma: no cover - exercised only when torch is unavailable
-    torch = None
-
 from poc.rl_checkpoint import (
     OpponentPool,
     load_checkpoint,
@@ -24,6 +19,7 @@ from poc.rl_config import (
     DEFAULT_EVAL_OPPONENTS,
     DEFAULT_TRAINING_SCENARIOS,
     DEFAULT_TRAINING_SCRIPTED_OPPONENTS,
+    PPOConfig,
     SelfPlayConfig,
     selfplay_config_from_dict,
 )
@@ -41,12 +37,8 @@ from poc.rl_selfplay import (
     observation_dim,
     selector_from_snapshot,
 )
+from poc.torch_compat import require_torch, torch
 from poc.planner import UtilityPlanner
-
-
-def _require_torch() -> None:
-    if torch is None:
-        raise ModuleNotFoundError("PyTorch is required for self-play PPO. Install project dependencies with torch.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,21 +89,28 @@ def build_config(args: argparse.Namespace) -> SelfPlayConfig:
     from poc.entities import Side
 
     return SelfPlayConfig(
-        seed=args.seed,
-        device=args.device or "cpu",
-        steps_per_update=args.steps_per_update,
-        matches_per_update=args.matches_per_update,
-        epochs_per_update=args.epochs_per_update,
-        minibatch_size=args.minibatch_size,
-        gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_epsilon=args.clip_epsilon,
-        entropy_coef=args.entropy_coef,
-        value_coef=args.value_coef,
-        max_grad_norm=args.max_grad_norm,
-        learning_rate=args.learning_rate,
-        side=Side(args.side),
-        dt=args.dt,
+        ppo=PPOConfig(
+            seed=args.seed,
+            device=args.device or "cpu",
+            steps_per_update=args.steps_per_update,
+            matches_per_update=args.matches_per_update,
+            epochs_per_update=args.epochs_per_update,
+            minibatch_size=args.minibatch_size,
+            gamma=args.gamma,
+            gae_lambda=args.gae_lambda,
+            clip_epsilon=args.clip_epsilon,
+            entropy_coef=args.entropy_coef,
+            value_coef=args.value_coef,
+            max_grad_norm=args.max_grad_norm,
+            learning_rate=args.learning_rate,
+            side=Side(args.side),
+            dt=args.dt,
+            opponent_pool_size=args.opponent_pool_size,
+            checkpoint_every_updates=args.checkpoint_every_updates,
+            eval_every_updates=args.eval_every_updates,
+            updates=args.updates if args.updates is not None else 100,
+            hidden_sizes=tuple(args.hidden_sizes),
+        ),
         thermometer_reward_bonus=args.thermometer_reward_bonus,
         terminal_win_bonus=args.terminal_win_bonus,
         terminal_draw_bonus=args.terminal_draw_bonus,
@@ -120,11 +119,6 @@ def build_config(args: argparse.Namespace) -> SelfPlayConfig:
         enemy_velocity_noise_std_mps=args.enemy_velocity_noise_std_mps,
         enemy_velocity_self_motion_leak_fraction=args.enemy_velocity_self_motion_leak_fraction,
         enemy_velocity_self_motion_leak_duration_s=args.enemy_velocity_self_motion_leak_duration_s,
-        opponent_pool_size=args.opponent_pool_size,
-        checkpoint_every_updates=args.checkpoint_every_updates,
-        eval_every_updates=args.eval_every_updates,
-        updates=args.updates if args.updates is not None else 100,
-        hidden_sizes=tuple(args.hidden_sizes),
         rollout_workers=args.rollout_workers if args.rollout_workers is not None else 1,
         eval_workers=args.eval_workers if args.eval_workers is not None else 1,
         training_scenarios=tuple(args.training_scenarios),
@@ -157,11 +151,12 @@ def config_for_resume(
     saved_config: SelfPlayConfig,
 ) -> SelfPlayConfig:
     payload = saved_config.to_dict()
-    payload.pop("ppo", None)
+    ppo_payload = dict(payload["ppo"])
     if args.device is not None:
-        payload["device"] = args.device
+        ppo_payload["device"] = args.device
     if args.updates is not None:
-        payload["updates"] = args.updates
+        ppo_payload["updates"] = args.updates
+    payload["ppo"] = ppo_payload
     if args.rollout_workers is not None:
         payload["rollout_workers"] = args.rollout_workers
     if args.eval_workers is not None:
@@ -223,7 +218,7 @@ def aggregate_eval_metrics_for_kinds(
 
 
 def main(argv: list[str] | None = None) -> int:
-    _require_torch()
+    require_torch(torch)
     args = build_parser().parse_args(argv)
     resume_path, init_checkpoint_path = resolve_start_paths(args)
     config = build_config(args) if resume_path is None else None
@@ -237,22 +232,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if resume_path is None:
         assert config is not None
-        rng = random.Random(config.seed)
-        torch.manual_seed(config.seed)
+        rng = random.Random(config.ppo.seed)
+        torch.manual_seed(config.ppo.seed)
     else:
         saved_header = torch.load(resume_path, map_location="cpu", weights_only=False)
         saved_config = selfplay_config_from_dict(dict(saved_header["config"]))
         config = config_for_resume(args, saved_config)
-        rng = random.Random(config.seed)
-        torch.manual_seed(config.seed)
+        rng = random.Random(config.ppo.seed)
+        torch.manual_seed(config.ppo.seed)
 
     planner = UtilityPlanner()
-    learner_model = build_model(config).to(torch.device(config.device))
+    learner_model = build_model(config).to(torch.device(config.ppo.device))
     if init_checkpoint_path is not None:
-        init_payload = load_checkpoint(init_checkpoint_path, map_location=config.device)
+        init_payload = load_checkpoint(init_checkpoint_path, map_location=config.ppo.device)
         load_compatible_state_dict(learner_model, init_payload["model_state"])
-    optimizer = torch.optim.Adam(learner_model.parameters(), lr=config.learning_rate)
-    opponent_pool = OpponentPool(config.opponent_pool_size)
+    optimizer = torch.optim.Adam(learner_model.parameters(), lr=config.ppo.learning_rate)
+    opponent_pool = OpponentPool(config.ppo.opponent_pool_size)
 
     best_winrate = float("-inf")
     best_winrate_tiebreak = float("-inf")
@@ -263,11 +258,11 @@ def main(argv: list[str] | None = None) -> int:
             resume_path,
             model=learner_model,
             optimizer=optimizer,
-            map_location=config.device,
+            map_location=config.ppo.device,
         )
         pool_state = payload.get("opponent_pool")
         if isinstance(pool_state, dict):
-            opponent_pool = OpponentPool.from_state(pool_state, max_size=config.opponent_pool_size)
+            opponent_pool = OpponentPool.from_state(pool_state, max_size=config.ppo.opponent_pool_size)
         best_winrate = float(payload.get("best_winrate", float("-inf")))
         best_winrate_tiebreak = float(payload.get("best_winrate_tiebreak", payload.get("best_score_diff", float("-inf"))))
         best_score_diff = float(payload.get("best_score_diff", float("-inf")))
@@ -281,19 +276,19 @@ def main(argv: list[str] | None = None) -> int:
         if cuda_rng_state_all is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(normalize_torch_cuda_rng_state_all(cuda_rng_state_all))
         start_update = int(payload.get("update_id", 0)) + 1
-        print(f"resuming_from={resume_path} start_update={start_update} total_updates={config.updates} device={config.device}")
+        print(f"resuming_from={resume_path} start_update={start_update} total_updates={config.ppo.updates} device={config.ppo.device}")
     elif init_checkpoint_path is not None:
-        print(f"init_from_checkpoint={init_checkpoint_path} start_update=1 total_updates={config.updates} device={config.device}")
-    if start_update > config.updates:
+        print(f"init_from_checkpoint={init_checkpoint_path} start_update=1 total_updates={config.ppo.updates} device={config.ppo.device}")
+    if start_update > config.ppo.updates:
         print(
-            f"resume checkpoint already reached update {start_update - 1}, nothing to do for updates={config.updates}",
+            f"resume checkpoint already reached update {start_update - 1}, nothing to do for updates={config.ppo.updates}",
             flush=True,
         )
         return 0
 
     print(
-        f"training_start start_update={start_update} total_updates={config.updates} "
-        f"device={config.device} rollout_workers={config.rollout_workers} eval_workers={config.eval_workers}",
+        f"training_start start_update={start_update} total_updates={config.ppo.updates} "
+        f"device={config.ppo.device} rollout_workers={config.rollout_workers} eval_workers={config.eval_workers}",
         flush=True,
     )
     worker_pools = PersistentWorkerPools(
@@ -301,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         eval_workers=config.eval_workers,
     )
 
-    for update_id in range(start_update, config.updates + 1):
+    for update_id in range(start_update, config.ppo.updates + 1):
         print(f"[update {update_id}] start", flush=True)
         rollout_batch, match_summaries = build_rollout_batch(
             config=config,
@@ -316,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
             learner_model,
             optimizer,
             rollout_batch,
-            config.ppo_config(),
+            config.ppo,
             rng=rng,
         )
 
@@ -330,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             action_dim=action_dim(),
             metadata={"type": "latest"},
         )
-        if update_id % config.checkpoint_every_updates == 0:
+        if update_id % config.ppo.checkpoint_every_updates == 0:
             opponent_pool.add_checkpoint_snapshot(learner_model, update_id)
 
         eval_summaries: list[EvaluationSummary] = []
@@ -354,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         robust_eval_score_diff = 0.0
         robust_eval_p10_score_diff = 0.0
         robust_eval_min_score_diff = 0.0
-        if update_id % config.eval_every_updates == 0:
+        if update_id % config.ppo.eval_every_updates == 0:
             eval_summaries = evaluate_policy(
                 config=config,
                 learner_model=learner_model,

@@ -6,14 +6,10 @@ from math import ceil
 import multiprocessing as mp
 import random
 
-try:
-    import torch
-except ModuleNotFoundError:  # pragma: no cover - exercised only when torch is unavailable
-    torch = None
-
 from poc.actions import Action
+from poc.controllers import ActionController, build_scripted_controller
 from poc.entities import DEFAULT_ROBOT_SPEED_MPS, Side
-from poc.opponent_policy import build_opponent_policy, materialize_policy_name, policy_name_uses_variant_seed
+from poc.opponent_policy import materialize_policy_name, policy_name_uses_variant_seed
 from poc.planner import UtilityPlanner
 from poc.rl_checkpoint import OpponentPool, PolicySnapshot, clone_state_dict
 from poc.rl_config import SelfPlayConfig, selfplay_config_from_dict
@@ -22,18 +18,16 @@ from poc.rl_infra import (
     DEFAULT_FLAT_FEATURE_KEYS,
     RLObservationConfig,
     RLTransition,
+    build_rl_policy_step,
+    build_rl_transitions_from_match_result,
     flat_feature_vector,
     resolve_policy_action,
 )
 from poc.rl_model import MaskedPolicyValueNet, greedy_action, load_compatible_state_dict, sample_action
 from poc.rl_ppo import PPORolloutBatch, PPORolloutItem
 from poc.scenarios import build_scenario
-from poc.simulator import ActionSelector, Simulator
-
-
-def _require_torch() -> None:
-    if torch is None:
-        raise ModuleNotFoundError("PyTorch is required for self-play PPO. Install project dependencies with torch.")
+from poc.simulator import MatchResult, Simulator
+from poc.torch_compat import require_torch, torch
 
 
 def _make_process_pool(max_workers: int) -> ProcessPoolExecutor:
@@ -85,7 +79,7 @@ class PolicyDecisionRecord:
 @dataclass(frozen=True, slots=True)
 class OpponentSpec:
     name: str
-    selector: ActionSelector | None = None
+    selector: ActionController | None = None
     opponent_policy_name: str = "nearest_greedy"
     kind: str = "scripted"
     state_dict: dict[str, object] | None = None
@@ -247,13 +241,11 @@ class RandomMaskedPolicySelector:
     def select_action(
         self,
         *,
-        state,
-        planner,
-        side,
+        observation,
         ranked_actions,
-        policy_step,
     ) -> Action:
-        del state, planner
+        side = observation.side
+        policy_step = build_rl_policy_step(observation)
         valid_indices = [index for index, enabled in enumerate(policy_step.action_mask) if enabled]
         if not valid_indices:
             return ranked_actions[0]
@@ -272,7 +264,7 @@ class TorchPolicySelector:
         greedy: bool,
         name: str,
     ) -> None:
-        _require_torch()
+        require_torch(torch)
         self.model = model
         self.device = torch.device(device)
         self.greedy = greedy
@@ -287,13 +279,11 @@ class TorchPolicySelector:
     def select_action(
         self,
         *,
-        state,
-        planner,
-        side,
+        observation,
         ranked_actions,
-        policy_step,
     ) -> Action:
-        del state, planner
+        side = observation.side
+        policy_step = build_rl_policy_step(observation)
         self.model.eval()
         observation_tensor = torch.tensor(
             [flat_feature_vector(policy_step.observation)],
@@ -355,13 +345,13 @@ def build_model(config: SelfPlayConfig) -> MaskedPolicyValueNet:
     return MaskedPolicyValueNet(
         observation_dim=observation_dim(),
         action_dim=action_dim(),
-        hidden_sizes=config.hidden_sizes,
+        hidden_sizes=config.ppo.hidden_sizes,
     )
 
 
 def build_observation_config(config: SelfPlayConfig) -> RLObservationConfig:
     return RLObservationConfig(
-        observation_noise_seed=config.seed,
+        observation_noise_seed=config.ppo.seed,
         enemy_velocity_noise_std_mps=config.enemy_velocity_noise_std_mps,
         enemy_velocity_self_motion_leak_fraction=config.enemy_velocity_self_motion_leak_fraction,
         enemy_velocity_self_motion_leak_duration_s=config.enemy_velocity_self_motion_leak_duration_s,
@@ -374,13 +364,13 @@ def selector_from_snapshot(
     config: SelfPlayConfig,
     greedy: bool,
 ) -> TorchPolicySelector:
-    _require_torch()
+    require_torch(torch)
     model = build_model(config)
     load_compatible_state_dict(model, snapshot.state_dict)
-    model.to(torch.device(config.device))
+    model.to(torch.device(config.ppo.device))
     return TorchPolicySelector(
         model=model,
-        device=config.device,
+        device=config.ppo.device,
         greedy=greedy,
         name=snapshot.name,
     )
@@ -439,37 +429,40 @@ def play_match(
     scenario = build_scenario(
         scenario_name,
         seed=seed,
-        our_side=config.side,
+        our_side=config.ppo.side,
         opponent_policy_name=opponent_spec.opponent_policy_name,
         our_robot_speed=DEFAULT_ROBOT_SPEED_MPS,
         enemy_robot_speed=DEFAULT_ROBOT_SPEED_MPS * enemy_speed_scale,
     )
     selectors = {
-        config.side: learner_selector,
+        config.ppo.side: learner_selector,
     }
     if opponent_spec.selector is not None:
-        selectors[config.side.opponent()] = opponent_spec.selector
+        selectors[config.ppo.side.opponent()] = opponent_spec.selector
     simulator = Simulator(
         state=scenario.game_state,
         scenario_name=scenario.name,
-        opponent_policy=build_opponent_policy(opponent_spec.opponent_policy_name),
         planner=planner or UtilityPlanner(),
-        dt=config.dt,
-        action_selectors=selectors,
-        rl_observation_config=build_observation_config(config),
-        thermometer_reward_bonus=config.thermometer_reward_bonus,
-        terminal_win_bonus=config.terminal_win_bonus,
-        terminal_draw_bonus=config.terminal_draw_bonus,
-        terminal_loss_bonus=config.terminal_loss_bonus,
+        dt=config.ppo.dt,
+        controllers=selectors,
+        opponent_controller=build_scripted_controller(opponent_spec.opponent_policy_name),
     )
     learner_selector.reset()
     if opponent_spec.selector is not None and hasattr(opponent_spec.selector, "reset"):
         opponent_spec.selector.reset()
     result = simulator.run()
-    result.summary["our_speed_mps"] = round(scenario.game_state.robot_for_side(config.side).speed, 4)
-    result.summary["enemy_speed_mps"] = round(scenario.game_state.robot_for_side(config.side.opponent()).speed, 4)
+    result.summary["our_speed_mps"] = round(scenario.game_state.robot_for_side(config.ppo.side).speed, 4)
+    result.summary["enemy_speed_mps"] = round(scenario.game_state.robot_for_side(config.ppo.side.opponent()).speed, 4)
     result.summary["enemy_speed_scale"] = round(enemy_speed_scale, 4)
-    learner_transitions = [item for item in result.rl_transitions if item.side == config.side.value]
+    learner_transitions = build_rl_transitions_from_match_result(
+        result,
+        side=config.ppo.side,
+        config=build_observation_config(config),
+        thermometer_reward_bonus=config.thermometer_reward_bonus,
+        terminal_win_bonus=config.terminal_win_bonus,
+        terminal_draw_bonus=config.terminal_draw_bonus,
+        terminal_loss_bonus=config.terminal_loss_bonus,
+    )
     rollout_items = transitions_to_rollout_items(
         learner_transitions,
         learner_selector.records,
@@ -519,15 +512,14 @@ def transitions_to_rollout_items(
 
 def _cpu_worker_config(config: SelfPlayConfig) -> SelfPlayConfig:
     payload = config.to_dict()
-    payload.pop("ppo", None)
-    payload["device"] = "cpu"
+    payload["ppo"]["device"] = "cpu"
     return selfplay_config_from_dict(payload)
 
 
 def _worker_runtime_signature(config: SelfPlayConfig) -> tuple[object, ...]:
     return (
-        config.device,
-        tuple(config.hidden_sizes),
+        config.ppo.device,
+        tuple(config.ppo.hidden_sizes),
     )
 
 
@@ -536,7 +528,7 @@ def _get_worker_runtime(config: SelfPlayConfig) -> _WorkerRuntime:
     signature = _worker_runtime_signature(config)
     if _WORKER_RUNTIME is not None and _WORKER_RUNTIME.signature == signature:
         return _WORKER_RUNTIME
-    device = torch.device(config.device)
+    device = torch.device(config.ppo.device)
     learner_model = build_model(config)
     learner_model.to(device)
     opponent_model = build_model(config)
@@ -579,7 +571,7 @@ def _build_worker_request(
 
 
 def _play_match_worker(request: WorkerMatchRequest) -> WorkerMatchResult:
-    _require_torch()
+    require_torch(torch)
     torch.set_num_threads(1)
     if hasattr(torch, "set_num_interop_threads"):
         try:
@@ -592,19 +584,19 @@ def _play_match_worker(request: WorkerMatchRequest) -> WorkerMatchResult:
     load_compatible_state_dict(runtime.learner_model, request.learner_state_dict)
     learner_selector = TorchPolicySelector(
         model=runtime.learner_model,
-        device=config.device,
+        device=config.ppo.device,
         greedy=request.learner_greedy,
         name="learner_worker",
     )
 
-    opponent_selector: ActionSelector | None = None
+    opponent_selector: ActionController | None = None
     if request.opponent_kind == "random":
         opponent_selector = RandomMaskedPolicySelector(random.Random(request.seed ^ 0xA5A5A5), name=request.opponent_name)
     elif request.opponent_state_dict is not None:
         load_compatible_state_dict(runtime.opponent_model, request.opponent_state_dict)
         opponent_selector = TorchPolicySelector(
             model=runtime.opponent_model,
-            device=config.device,
+            device=config.ppo.device,
             greedy=request.opponent_greedy,
             name=request.opponent_name,
         )
@@ -626,7 +618,15 @@ def _play_match_worker(request: WorkerMatchRequest) -> WorkerMatchResult:
         planner=runtime.planner,
     )
     items = transitions_to_rollout_items(
-        [item for item in artifacts.result.rl_transitions if item.side == config.side.value],
+        build_rl_transitions_from_match_result(
+            artifacts.result,
+            side=config.ppo.side,
+            config=build_observation_config(config),
+            thermometer_reward_bonus=config.thermometer_reward_bonus,
+            terminal_win_bonus=config.terminal_win_bonus,
+            terminal_draw_bonus=config.terminal_draw_bonus,
+            terminal_loss_bonus=config.terminal_loss_bonus,
+        ),
         list(artifacts.learner_records),
         update_id=request.update_id,
         episode_id=request.episode_id,
@@ -654,14 +654,14 @@ def build_rollout_batch(
     update_id: int,
     executor: ProcessPoolExecutor | None = None,
 ) -> tuple[PPORolloutBatch, list[dict[str, object]]]:
-    _require_torch()
+    require_torch(torch)
     rollout_items: list[PPORolloutItem] = []
     match_summaries: list[dict[str, object]] = []
     episode_counter = 0
     steps = 0
     matches = 0
-    target_steps = max(config.steps_per_update, 1)
-    minimum_matches = max(config.matches_per_update, 1)
+    target_steps = max(config.ppo.steps_per_update, 1)
+    minimum_matches = max(config.ppo.matches_per_update, 1)
     worker_count = max(config.rollout_workers, 1)
     learner_state_dict = clone_state_dict(learner_model)
     progress_interval = 4
@@ -737,7 +737,7 @@ def build_rollout_batch(
 
     learner_selector = TorchPolicySelector(
         model=learner_model,
-        device=config.device,
+        device=config.ppo.device,
         greedy=False,
         name="learner_policy",
     )
@@ -754,7 +754,15 @@ def build_rollout_batch(
             planner=planner,
         )
         items = transitions_to_rollout_items(
-            [item for item in artifacts.result.rl_transitions if item.side == config.side.value],
+            build_rl_transitions_from_match_result(
+                artifacts.result,
+                side=config.ppo.side,
+                config=build_observation_config(config),
+                thermometer_reward_bonus=config.thermometer_reward_bonus,
+                terminal_win_bonus=config.terminal_win_bonus,
+                terminal_draw_bonus=config.terminal_draw_bonus,
+                terminal_loss_bonus=config.terminal_loss_bonus,
+            ),
             list(artifacts.learner_records),
             update_id=update_id,
             episode_id=episode_counter,
@@ -794,7 +802,7 @@ def evaluate_policy(
     opponent_specs: list[OpponentSpec],
     executor: ProcessPoolExecutor | None = None,
 ) -> list[EvaluationSummary]:
-    _require_torch()
+    require_torch(torch)
     summaries: list[EvaluationSummary] = []
     worker_count = max(config.eval_workers, 1)
     learner_state_dict = clone_state_dict(learner_model)
@@ -887,7 +895,7 @@ def evaluate_policy(
         for match_index in range(config.eval_matches_per_opponent):
             learner_selector = TorchPolicySelector(
                 model=learner_model,
-                device=config.device,
+                device=config.ppo.device,
                 greedy=True,
                 name="learner_eval",
             )

@@ -6,21 +6,12 @@ import json
 from pathlib import Path
 import random
 
-try:
-    import torch
-except ModuleNotFoundError:  # pragma: no cover - exercised only when torch is unavailable
-    torch = None
-
 from poc.planner import UtilityPlanner
 from poc.rl_checkpoint import OpponentPool, load_checkpoint
 from poc.rl_config import DEFAULT_EVAL_OPPONENTS, selfplay_config_from_dict
 from poc.rl_model import load_compatible_state_dict
 from poc.rl_selfplay import OpponentSpec, build_model, classify_opponent_kind, evaluate_policy, selector_from_snapshot
-
-
-def _require_torch() -> None:
-    if torch is None:
-        raise ModuleNotFoundError("PyTorch is required for self-play PPO evaluation. Install project dependencies with torch.")
+from poc.torch_compat import require_torch, torch
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,17 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _require_torch()
+    require_torch(torch)
     args = build_parser().parse_args(argv)
     payload = load_checkpoint(args.checkpoint)
     config = selfplay_config_from_dict(dict(payload["config"]))
     if args.device is not None:
-        config = selfplay_config_from_dict({**config.to_dict(), "device": args.device})
+        config_payload = config.to_dict()
+        config_payload["ppo"]["device"] = args.device
+        config = selfplay_config_from_dict(config_payload)
     if args.matches_per_opponent is not None:
         config = selfplay_config_from_dict({**config.to_dict(), "eval_matches_per_opponent": args.matches_per_opponent})
 
     planner = UtilityPlanner()
-    model = build_model(config).to(torch.device(config.device))
+    model = build_model(config).to(torch.device(config.ppo.device))
     load_compatible_state_dict(model, payload["model_state"])
 
     opponents = [
@@ -62,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         state_payload = load_checkpoint(training_state_path)
         pool_state = state_payload.get("opponent_pool")
         if isinstance(pool_state, dict):
-            pool = OpponentPool.from_state(pool_state, max_size=config.opponent_pool_size)
+            pool = OpponentPool.from_state(pool_state, max_size=config.ppo.opponent_pool_size)
             for snapshot in pool.evaluation_snapshots(limit=2):
                 opponents.append(
                     OpponentSpec(
@@ -76,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
         learner_model=model,
         planner=planner,
-        rng=random.Random(config.seed),
+        rng=random.Random(config.ppo.seed),
         opponent_specs=opponents,
     )
     output_payload = {

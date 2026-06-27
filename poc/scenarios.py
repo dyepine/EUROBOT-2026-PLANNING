@@ -7,7 +7,6 @@ from poc.endgame import build_endgame_config
 from poc.entities import Mars, Robot, Side, SourceState
 from poc.external_events import EventType, ExternalEvent
 from poc.game_state import GameState
-from poc.opponent_policy import OpponentPolicy, build_opponent_policy
 from poc.semantic_map import build_default_semantic_map
 
 
@@ -16,7 +15,7 @@ class Scenario:
     name: str
     description: str
     game_state: GameState
-    opponent_policy: OpponentPolicy
+    default_opponent_policy_name: str
 
 
 def build_scenario(
@@ -27,7 +26,7 @@ def build_scenario(
     our_robot_speed: float | None = None,
     enemy_robot_speed: float | None = None,
 ) -> Scenario:
-    del seed  # reserved for future scenario event randomization
+    variant_seed = max(1, int(seed))
 
     semantic_map = build_default_semantic_map().clone()
     enemy_side = our_side.opponent()
@@ -89,11 +88,11 @@ def build_scenario(
     elif name == "yellow_side_fixed_sequence_enemy":
         scenario_opponent_policy_name = "yellow_side_fixed_sequence"
     elif name == "stochastic_enemy":
-        scenario_opponent_policy_name = "stochastic_planner@1"
+        scenario_opponent_policy_name = f"stochastic_planner@{variant_seed}"
     elif name == "uniform_random_enemy":
-        scenario_opponent_policy_name = "uniform_random@1"
+        scenario_opponent_policy_name = f"uniform_random@{variant_seed}"
     elif name == "randomized_aggressive_enemy":
-        scenario_opponent_policy_name = "randomized_aggressive@1"
+        scenario_opponent_policy_name = f"randomized_aggressive@{variant_seed}"
     elif name != "baseline":
         raise ValueError(f"Unknown scenario: {name}")
 
@@ -120,7 +119,7 @@ def build_scenario(
         name=name,
         description=_scenario_description(name),
         game_state=game_state,
-        opponent_policy=build_opponent_policy(opponent_policy_name or scenario_opponent_policy_name),
+        default_opponent_policy_name=opponent_policy_name or scenario_opponent_policy_name,
     )
 
 

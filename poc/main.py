@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from poc.controllers import build_scripted_controller
 from poc.metrics import summarize_batch
 from poc.planner import UtilityPlanner
+from poc.registries import SCENARIO_NAMES
 from poc.scenarios import build_scenario
 from poc.simulator import Simulator, save_result
 
@@ -14,18 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scenario",
         default="baseline",
-        choices=[
-            "baseline",
-            "delayed_sources",
-            "aggressive_enemy",
-            "thermo_first_enemy",
-            "storage_first_enemy",
-            "home_safe_enemy",
-            "yellow_side_fixed_sequence_enemy",
-            "stochastic_enemy",
-            "uniform_random_enemy",
-            "randomized_aggressive_enemy",
-        ],
+        choices=SCENARIO_NAMES,
     )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dt", type=float, default=0.5)
@@ -45,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=args.dt,
         )

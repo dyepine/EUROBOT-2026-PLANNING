@@ -5,21 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import random
 
-try:
-    import torch
-except ModuleNotFoundError:  # pragma: no cover - exercised only when torch is unavailable
-    torch = None
-
 from poc.rl_config import SelfPlayConfig
-
-
-def _require_torch() -> None:
-    if torch is None:
-        raise ModuleNotFoundError("PyTorch is required for self-play PPO. Install project dependencies with torch.")
+from poc.torch_compat import require_torch, torch
 
 
 def clone_state_dict(model: object) -> dict[str, object]:
-    _require_torch()
+    require_torch(torch)
     return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
@@ -99,7 +90,7 @@ def save_policy_checkpoint(
     action_dim: int,
     metadata: dict[str, object] | None = None,
 ) -> Path:
-    _require_torch()
+    require_torch(torch)
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -131,7 +122,7 @@ def save_training_state(
     best_score_diff: float,
     rng: random.Random,
 ) -> Path:
-    _require_torch()
+    require_torch(torch)
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -156,7 +147,7 @@ def save_training_state(
 
 
 def load_checkpoint(path: str | Path, map_location: str = "cpu") -> dict[str, object]:
-    _require_torch()
+    require_torch(torch)
     return torch.load(Path(path), map_location=map_location, weights_only=False)
 
 
@@ -174,7 +165,7 @@ def load_training_state(
 
 
 def normalize_torch_rng_state(state: object) -> object:
-    _require_torch()
+    require_torch(torch)
     if state is None:
         return None
     if isinstance(state, torch.Tensor):
@@ -186,7 +177,7 @@ def normalize_torch_rng_state(state: object) -> object:
 
 
 def normalize_torch_cuda_rng_state_all(states: object) -> list[object] | None:
-    _require_torch()
+    require_torch(torch)
     if states is None:
         return None
     if isinstance(states, tuple):

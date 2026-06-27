@@ -4,20 +4,14 @@ from dataclasses import dataclass
 from math import ceil
 import random
 
-try:
-    import torch
-    import torch.nn.functional as F
-except ModuleNotFoundError:  # pragma: no cover - exercised only when torch is unavailable
-    torch = None
-    F = None
-
 from poc.rl_config import PPOConfig
 from poc.rl_model import MaskedPolicyValueNet
+from poc.torch_compat import require_torch, torch
 
-
-def _require_torch() -> None:
-    if torch is None or F is None:
-        raise ModuleNotFoundError("PyTorch is required for PPO training. Install project dependencies with torch.")
+if torch is not None:
+    import torch.nn.functional as F
+else:  # pragma: no cover - exercised only when torch is unavailable
+    F = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +95,7 @@ def build_training_batch(
     items: list[PPORolloutItem],
     config: PPOConfig,
 ) -> PPOTrainingBatch:
-    _require_torch()
+    require_torch(torch)
     advantages, returns = compute_gae_returns(items, config.gamma, config.gae_lambda)
     advantages_tensor = torch.tensor(advantages, dtype=torch.float32)
     advantages_mean = advantages_tensor.mean()
@@ -125,7 +119,7 @@ def ppo_update(
     *,
     rng: random.Random | None = None,
 ) -> PPOUpdateStats:
-    _require_torch()
+    require_torch(torch)
     if not rollout_batch.items:
         return PPOUpdateStats(
             steps=0,

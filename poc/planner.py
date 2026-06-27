@@ -12,7 +12,7 @@ from poc.geometry import distance, point_to_segment_distance
 from poc.grid_map import DEFAULT_LAYOUT_PATH, GridOccupancyMap
 from poc.grid_planner import GridAStarPlanner
 from poc.map_config import DEFAULT_ACTION_MASK_HEURISTICS, ActionMaskHeuristicsConfig
-from poc.policy_mapping import normalized_action_label, normalized_target_id
+from poc.rules import home_deposit_for_side, home_return_blocked, thermometer_lane_is_clear
 from poc.scoring import deposit_max_count_for_side, evaluate_action
 
 
@@ -23,13 +23,15 @@ class PlanningDecision:
     reason: str = ""
 
     def debug_payload(self, t: float, side: Side) -> dict[str, object]:
-        return {
-            "time": round(t, 3),
-            "side": side.value,
-            "reason": self.reason,
-            "chosen_action": _policy_debug_row(self.chosen_action, side),
-            "candidates": [_policy_debug_row(action, side) for action in self.ranked_actions],
-        }
+        from poc.debug import planning_debug_payload
+
+        return planning_debug_payload(
+            time=t,
+            side=side,
+            reason=self.reason,
+            chosen_action=self.chosen_action,
+            ranked_actions=self.ranked_actions,
+        )
 
 
 @dataclass(slots=True)
@@ -517,16 +519,8 @@ class UtilityPlanner:
             return True
         return state.t >= latest_departure - 1e-9
 
-    @staticmethod
-    def _home_deposit_for_side(state: GameState, side: Side) -> DepositPoint | None:
-        for deposit in state.deposits.values():
-            if deposit.kind is DepositType.HOME and deposit.owner is side:
-                return deposit
-        return None
-
     def _home_return_blocked(self, state: GameState, side: Side) -> bool:
-        home = self._home_deposit_for_side(state, side)
-        return home is not None and home.total_items() > 0
+        return home_return_blocked(state, side)
 
     def _best_route(
         self,
@@ -1073,19 +1067,7 @@ class UtilityPlanner:
         return False
 
     def _thermometer_lane_is_clear(self, state: GameState, side: Side) -> bool:
-        blocking_source_id = state.thermometer.blocking_source_id_for_side(side)
-        source = state.sources.get(blocking_source_id)
-        blocking_source_clear = (
-            source is None
-            or source.state is SourceState.EMPTY
-            or source.available_items <= 0
-        )
-        zone_10 = state.deposits.get(10)
-        zone_10_clear = zone_10 is None or zone_10.total_items() == 0
-        blocking_deposit_id = state.thermometer.blocking_deposit_id_for_side(side)
-        blocking_deposit = state.deposits.get(blocking_deposit_id)
-        blocking_deposit_clear = blocking_deposit is None or blocking_deposit.total_items() == 0
-        return blocking_source_clear and zone_10_clear and blocking_deposit_clear
+        return thermometer_lane_is_clear(state, side)
 
     @staticmethod
     def _route_target_position(
@@ -1097,10 +1079,3 @@ class UtilityPlanner:
         if planned_route.semantic_waypoints:
             return planned_route.semantic_waypoints[-1]
         return fallback
-
-
-def _policy_debug_row(action: Action, side: Side) -> dict[str, float | int | str | bool | None]:
-    row = action.debug_row()
-    row["policy_action"] = normalized_action_label(action, side)
-    row["policy_target_id"] = normalized_target_id(action.target_id, action.type, side)
-    return row

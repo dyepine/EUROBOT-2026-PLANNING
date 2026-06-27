@@ -2,24 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-try:
+from poc.torch_compat import require_torch, torch
+
+if torch is not None:
     import torch
     from torch import Tensor, nn
     from torch.distributions import Categorical
-except ModuleNotFoundError:  # pragma: no cover - exercised only when torch is unavailable
-    torch = None
+else:  # pragma: no cover - exercised only when torch is unavailable
     Tensor = object
     nn = None
     Categorical = None
 
 
-def _require_torch() -> None:
-    if torch is None or nn is None or Categorical is None:
-        raise ModuleNotFoundError("PyTorch is required for self-play PPO. Install project dependencies with torch.")
-
-
 def load_compatible_state_dict(model: "MaskedPolicyValueNet", state_dict: dict[str, object]) -> None:
-    _require_torch()
+    require_torch(torch)
     target_state = model.state_dict()
     patched_state: dict[str, object] = {}
     for key, target_value in target_state.items():
@@ -85,7 +81,7 @@ if nn is None:  # pragma: no cover - exercised only when torch is unavailable
     class MaskedPolicyValueNet:
         def __init__(self, *args, **kwargs) -> None:
             del args, kwargs
-            _require_torch()
+            require_torch(torch)
 
 else:
 
@@ -125,14 +121,14 @@ else:
 
 
 def sample_action(masked_logits: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    _require_torch()
+    require_torch(torch)
     dist = Categorical(logits=masked_logits)
     action = dist.sample()
     return action, dist.log_prob(action), dist.entropy()
 
 
 def greedy_action(masked_logits: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    _require_torch()
+    require_torch(torch)
     dist = Categorical(logits=masked_logits)
     action = torch.argmax(masked_logits, dim=-1)
     return action, dist.log_prob(action), dist.entropy()

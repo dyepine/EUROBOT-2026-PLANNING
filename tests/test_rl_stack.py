@@ -12,20 +12,23 @@ from unittest import mock
 import numpy as np
 
 from poc.actions import Action, ActionType
+from poc.controllers import build_scripted_controller
 from poc.entities import DEFAULT_ROBOT_SPEED_MPS, Side, SourceState, Thermometer
 from poc.game_state import GameState
 from poc.geometry import advance_along_path, distance
 from poc.grid_map import DEFAULT_LAYOUT_PATH, GridOccupancyMap
 from poc.grid_planner import GridAStarPlanner
+from poc.observations import DecisionObservation, PreviousTickObservation, RobotObservation
 from poc.opponent_policy import FixedSequencePolicy, OrderedActionStep, build_opponent_policy
 from poc.planner import UtilityPlanner
-from poc.rl_config import SelfPlayConfig
+from poc.rl_config import PPOConfig, SelfPlayConfig
 from poc.rl_infra import (
     DEFAULT_ACTION_SPACE,
     DEFAULT_FLAT_FEATURE_KEYS,
     RLObservationConfig,
     build_rl_observation,
     build_rl_policy_step,
+    build_rl_transitions_from_match_result,
     resolve_policy_action,
 )
 from poc.rl_ppo import PPORolloutItem, compute_gae_returns
@@ -52,7 +55,33 @@ from poc.rl_train import (
 from poc.scoring import deposit_max_count, deposit_max_count_for_side
 from poc.scenarios import build_scenario
 from poc.semantic_map import build_default_semantic_map
-from poc.simulator import ActionSelector, ActiveAction, ActivePhase, Simulator
+from poc.simulator import ActiveAction, ActivePhase, Simulator
+
+
+def _previous_tick_from_state(state: GameState) -> PreviousTickObservation:
+    return PreviousTickObservation(
+        t=float(state.t),
+        blue_robot=RobotObservation(position=state.robot_for_side(Side.BLUE).position),
+        yellow_robot=RobotObservation(position=state.robot_for_side(Side.YELLOW).position),
+    )
+
+
+def _decision_observation(
+    state: GameState,
+    side: Side,
+    *,
+    ranked_actions: tuple[Action, ...] | list[Action] = (),
+    previous_state: GameState | PreviousTickObservation | None = None,
+    dt: float = 1.0,
+) -> DecisionObservation:
+    previous_tick = _previous_tick_from_state(previous_state) if isinstance(previous_state, GameState) else previous_state
+    return DecisionObservation(
+        state=state,
+        side=side,
+        ranked_actions=tuple(ranked_actions),
+        previous_state=previous_tick,
+        dt=dt,
+    )
 
 
 class RLInfraTests(unittest.TestCase):
@@ -95,12 +124,12 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
         result = simulator.run()
-        our_transitions = [item for item in result.rl_transitions if item.side == result.our_side]
+        our_transitions = build_rl_transitions_from_match_result(result, side=Side(result.our_side))
         self.assertTrue(our_transitions)
         for transition in our_transitions[:-1]:
             self.assertFalse(transition.done)
@@ -120,8 +149,8 @@ class RLInfraTests(unittest.TestCase):
         class ThermometerSelector:
             name = "thermo_test"
 
-            def select_action(self, *, state, planner, side, ranked_actions, policy_step):
-                del state, planner, side, policy_step
+            def select_action(self, *, observation, ranked_actions):
+                del observation
                 for action in ranked_actions:
                     if action.type is ActionType.DO_THERMOMETER:
                         return action
@@ -136,17 +165,24 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
-            action_selectors={Side.BLUE: ThermometerSelector()},
-            thermometer_reward_bonus=bonus,
-            terminal_win_bonus=0.0,
-            terminal_draw_bonus=0.0,
-            terminal_loss_bonus=0.0,
+            controllers={Side.BLUE: ThermometerSelector()},
         )
         result = simulator.run()
-        thermo_transitions = [item for item in result.rl_transitions if item.side == "blue" and item.chosen_action == "THERMOMETER"]
+        thermo_transitions = [
+            item
+            for item in build_rl_transitions_from_match_result(
+                result,
+                side=Side.BLUE,
+                thermometer_reward_bonus=bonus,
+                terminal_win_bonus=0.0,
+                terminal_draw_bonus=0.0,
+                terminal_loss_bonus=0.0,
+            )
+            if item.chosen_action == "THERMOMETER"
+        ]
         self.assertTrue(thermo_transitions)
         shaped = thermo_transitions[0]
         self.assertEqual(
@@ -204,9 +240,7 @@ class RLInfraTests(unittest.TestCase):
 
     def test_resume_helpers_preserve_saved_config_and_override_selected_fields(self) -> None:
         saved = SelfPlayConfig(
-            device="cuda",
-            updates=30,
-            dt=1.0,
+            ppo=PPOConfig(device="cuda", updates=30, dt=1.0),
             thermometer_reward_bonus=3.5,
             terminal_win_bonus=9.0,
             terminal_loss_bonus=-9.0,
@@ -217,9 +251,9 @@ class RLInfraTests(unittest.TestCase):
         )
         args = SimpleNamespace(device="cpu", updates=50, output_dir=None, rollout_workers=4, eval_workers=5)
         resumed = config_for_resume(args, saved)
-        self.assertEqual(resumed.device, "cpu")
-        self.assertEqual(resumed.updates, 50)
-        self.assertEqual(resumed.dt, 1.0)
+        self.assertEqual(resumed.ppo.device, "cpu")
+        self.assertEqual(resumed.ppo.updates, 50)
+        self.assertEqual(resumed.ppo.dt, 1.0)
         self.assertEqual(resumed.thermometer_reward_bonus, 3.5)
         self.assertEqual(resumed.terminal_win_bonus, 9.0)
         self.assertEqual(resumed.terminal_loss_bonus, -9.0)
@@ -354,15 +388,15 @@ class RLInfraTests(unittest.TestCase):
         self.assertEqual(build_opponent_policy("stochastic_planner@7").name, "stochastic_planner@7")
         self.assertEqual(build_opponent_policy("uniform_random@9").name, "uniform_random@9")
         self.assertEqual(build_opponent_policy("randomized_aggressive@11").name, "randomized_aggressive@11")
-        self.assertEqual(build_scenario("storage_first_enemy").opponent_policy.name, "storage_first")
-        self.assertEqual(build_scenario("home_safe_enemy").opponent_policy.name, "home_safe")
+        self.assertEqual(build_scenario("storage_first_enemy").default_opponent_policy_name, "storage_first")
+        self.assertEqual(build_scenario("home_safe_enemy").default_opponent_policy_name, "home_safe")
         self.assertEqual(
-            build_scenario("yellow_side_fixed_sequence_enemy").opponent_policy.name,
+            build_scenario("yellow_side_fixed_sequence_enemy").default_opponent_policy_name,
             "yellow_side_fixed_sequence",
         )
-        self.assertEqual(build_scenario("stochastic_enemy").opponent_policy.name, "stochastic_planner@1")
-        self.assertEqual(build_scenario("uniform_random_enemy").opponent_policy.name, "uniform_random@1")
-        self.assertEqual(build_scenario("randomized_aggressive_enemy").opponent_policy.name, "randomized_aggressive@1")
+        self.assertEqual(build_scenario("stochastic_enemy").default_opponent_policy_name, "stochastic_planner@1")
+        self.assertEqual(build_scenario("uniform_random_enemy").default_opponent_policy_name, "uniform_random@1")
+        self.assertEqual(build_scenario("randomized_aggressive_enemy").default_opponent_policy_name, "randomized_aggressive@1")
 
     def test_scenario_speed_overrides_and_enemy_speed_jitter_are_deterministic(self) -> None:
         scenario = build_scenario(
@@ -433,7 +467,7 @@ class RLInfraTests(unittest.TestCase):
     def test_enemy_max_speed_seen_feature_uses_running_observed_max(self) -> None:
         scenario = build_scenario("baseline", seed=1)
         scenario.game_state.max_observed_speed_by_side[Side.YELLOW] = 0.09
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
         self.assertAlmostEqual(observation.global_features["enemy_max_speed_seen_norm"], 0.5)
 
     def test_parallel_rollout_scheduler_accounts_for_pending_matches(self) -> None:
@@ -506,7 +540,7 @@ class RLInfraTests(unittest.TestCase):
         )
 
     def test_play_match_worker_reuses_models_and_planner_within_process(self) -> None:
-        config = SelfPlayConfig(device="cpu")
+        config = SelfPlayConfig(ppo=PPOConfig(device="cpu"))
         opponent_spec = OpponentSpec(
             name="snapshot_a",
             kind="self_play",
@@ -547,7 +581,7 @@ class RLInfraTests(unittest.TestCase):
                 self.invalid_action_count = 0
 
         fake_artifacts = SimpleNamespace(
-            result=SimpleNamespace(rl_transitions=[], summary={}),
+            result=SimpleNamespace(decision_log=[], summary={"score_diff": 0.0}, our_side="blue"),
             learner_records=(),
             invalid_action_count=0,
         )
@@ -614,10 +648,12 @@ class RLInfraTests(unittest.TestCase):
         scenario.game_state.last_motion_start_time_by_side[Side.BLUE] = 0.95
 
         clean = build_rl_observation(
-            scenario.game_state,
-            Side.BLUE,
-            previous_state=previous_state,
-            dt=1.0,
+            _decision_observation(
+                scenario.game_state,
+                Side.BLUE,
+                previous_state=previous_state,
+                dt=1.0,
+            ),
             config=RLObservationConfig(),
         )
         noisy_cfg = RLObservationConfig(
@@ -627,17 +663,21 @@ class RLInfraTests(unittest.TestCase):
             enemy_velocity_self_motion_leak_duration_s=0.2,
         )
         noisy_a = build_rl_observation(
-            scenario.game_state,
-            Side.BLUE,
-            previous_state=previous_state,
-            dt=1.0,
+            _decision_observation(
+                scenario.game_state,
+                Side.BLUE,
+                previous_state=previous_state,
+                dt=1.0,
+            ),
             config=noisy_cfg,
         )
         noisy_b = build_rl_observation(
-            scenario.game_state,
-            Side.BLUE,
-            previous_state=previous_state,
-            dt=1.0,
+            _decision_observation(
+                scenario.game_state,
+                Side.BLUE,
+                previous_state=previous_state,
+                dt=1.0,
+            ),
             config=noisy_cfg,
         )
         self.assertEqual(noisy_a.global_features["enemy_vel_x_norm"], noisy_b.global_features["enemy_vel_x_norm"])
@@ -651,7 +691,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -662,7 +702,7 @@ class RLInfraTests(unittest.TestCase):
             target_position=scenario.game_state.sources[11].position,
         )
         simulator._apply_action_effects(Side.BLUE, action)
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
         features = observation.source_features["OUR_SOURCE_1"]
         self.assertAlmostEqual(features["last_items_delta_norm"], -0.5)
         self.assertEqual(features["time_since_last_change_norm"], 0.0)
@@ -674,7 +714,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -686,7 +726,7 @@ class RLInfraTests(unittest.TestCase):
             metadata={"deposit_count": 2},
         )
         simulator._apply_action_effects(Side.BLUE, action)
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
         features = observation.deposit_features["OUR_STORAGE_6"]
         self.assertAlmostEqual(features["last_score_diff_delta_norm"], 11.0 / 17.0)
         self.assertEqual(features["time_since_last_score_change_norm"], 0.0)
@@ -707,7 +747,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -719,7 +759,7 @@ class RLInfraTests(unittest.TestCase):
             target_position=scenario.game_state.thermometer.position,
         )
         simulator._apply_action_effects(Side.BLUE, action)
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
         self.assertEqual(observation.global_features["time_since_thermometer_state_change_norm"], 0.0)
         self.assertEqual(observation.global_features["time_since_our_lane_clear_change_norm"], 0.0)
         self.assertGreater(observation.global_features["time_since_enemy_lane_clear_change_norm"], 0.0)
@@ -727,7 +767,7 @@ class RLInfraTests(unittest.TestCase):
     def test_time_bucket_and_deadline_features_track_match_phase(self) -> None:
         scenario = build_scenario("baseline", seed=1)
         scenario.game_state.t = 85.0
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
         self.assertEqual(observation.global_features["time_bin_8"], 1.0)
         self.assertEqual(sum(observation.global_features[f"time_bin_{index}"] for index in range(10)), 1.0)
         self.assertEqual(observation.global_features["after_main_pipeline_deadline"], 1.0)
@@ -742,7 +782,7 @@ class RLInfraTests(unittest.TestCase):
         scenario = build_scenario("baseline", seed=1)
         scenario.game_state.our_robot.position = (0.2, -0.1)
         scenario.game_state.enemy_robot.position = (-0.4, 0.3)
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
 
         self.assertAlmostEqual(observation.global_features["enemy_rel_x_norm"], -0.4)
         self.assertAlmostEqual(observation.global_features["enemy_rel_y_norm"], 0.4)
@@ -814,14 +854,14 @@ class RLInfraTests(unittest.TestCase):
         scenario = build_scenario("baseline", seed=1)
         scenario.game_state.sources[11].state = SourceState.EMPTY
         scenario.game_state.sources[11].available_items = 0
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
         self.assertEqual(observation.source_features["OUR_SOURCE_1"]["state_empty"], 1.0)
 
     def test_deposit_normalized_point_and_occupancy_features_are_exposed(self) -> None:
         scenario = build_scenario("baseline", seed=1)
         deposit = scenario.game_state.deposits[101]
         deposit.add_items(Side.BLUE, 2)
-        observation = build_rl_observation(scenario.game_state, Side.BLUE, dt=1.0)
+        observation = build_rl_observation(_decision_observation(scenario.game_state, Side.BLUE, dt=1.0))
         features = observation.deposit_features["OUR_HOME"]
         self.assertAlmostEqual(features["total_items_norm"], 0.5)
         self.assertAlmostEqual(features["our_points_norm"], 4.0 / 17.0)
@@ -838,7 +878,7 @@ class RLInfraTests(unittest.TestCase):
         simulator_with_mars = Simulator(
             state=scenario_with_mars.game_state,
             scenario_name=scenario_with_mars.name,
-            opponent_policy=scenario_with_mars.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario_with_mars.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -853,7 +893,7 @@ class RLInfraTests(unittest.TestCase):
         simulator_without_mars = Simulator(
             state=scenario_without_mars.game_state,
             scenario_name=scenario_without_mars.name,
-            opponent_policy=scenario_without_mars.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario_without_mars.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -883,7 +923,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -991,7 +1031,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1018,7 +1058,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1053,7 +1093,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1070,7 +1110,7 @@ class RLInfraTests(unittest.TestCase):
         result_with_mars = Simulator(
             state=scenario_with_mars.game_state,
             scenario_name=scenario_with_mars.name,
-            opponent_policy=scenario_with_mars.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario_with_mars.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         ).run()
@@ -1083,7 +1123,7 @@ class RLInfraTests(unittest.TestCase):
         result_without_mars = Simulator(
             state=scenario_without_mars.game_state,
             scenario_name=scenario_without_mars.name,
-            opponent_policy=scenario_without_mars.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario_without_mars.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         ).run()
@@ -1098,7 +1138,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1116,7 +1156,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1138,7 +1178,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1158,7 +1198,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1182,7 +1222,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1211,7 +1251,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=1.0,
         )
@@ -1237,7 +1277,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=0.5,
         )
@@ -1262,7 +1302,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=0.5,
         )
@@ -1499,7 +1539,7 @@ class RLInfraTests(unittest.TestCase):
         ranked = planner.rank_actions(state, Side.BLUE)
 
         self.assertFalse(any(action.label == "ATTACK_27" for action in ranked))
-        policy_step = build_rl_policy_step(state, Side.BLUE, ranked)
+        policy_step = build_rl_policy_step(_decision_observation(state, Side.BLUE, ranked_actions=ranked))
         attack_index = DEFAULT_ACTION_SPACE.index_by_token["ATTACK_ENEMY_STORAGE_7"]
         self.assertEqual(policy_step.action_mask[attack_index], 0)
 
@@ -1524,7 +1564,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.2,
         )
@@ -1555,7 +1595,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.5,
         )
@@ -1591,7 +1631,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.5,
         )
@@ -1624,7 +1664,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.5,
         )
@@ -1657,7 +1697,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=UtilityPlanner(),
             dt=0.2,
         )
@@ -1700,7 +1740,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.5,
         )
@@ -1731,7 +1771,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.5,
         )
@@ -1766,7 +1806,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.5,
         )
@@ -1801,7 +1841,7 @@ class RLInfraTests(unittest.TestCase):
         simulator = Simulator(
             state=scenario.game_state,
             scenario_name=scenario.name,
-            opponent_policy=scenario.opponent_policy,
+            opponent_controller=build_scripted_controller(scenario.default_opponent_policy_name),
             planner=planner,
             dt=0.5,
         )
@@ -1996,7 +2036,7 @@ class TorchMaskTests(unittest.TestCase):
         model = MaskedPolicyValueNet(
             observation_dim=observation_dim(),
             action_dim=action_dim(),
-            hidden_sizes=SelfPlayConfig().hidden_sizes,
+            hidden_sizes=SelfPlayConfig().ppo.hidden_sizes,
         )
         observation = torch.zeros((1, observation_dim()), dtype=torch.float32)
         action_mask = torch.zeros((1, action_dim()), dtype=torch.float32)
@@ -2029,7 +2069,7 @@ class TorchMaskTests(unittest.TestCase):
         legacy_model = MaskedPolicyValueNet(
             observation_dim=legacy_observation_dim,
             action_dim=legacy_action_dim,
-            hidden_sizes=SelfPlayConfig().hidden_sizes,
+            hidden_sizes=SelfPlayConfig().ppo.hidden_sizes,
         )
         upgraded_model = build_model(SelfPlayConfig())
         load_compatible_state_dict(upgraded_model, legacy_model.state_dict())

@@ -2,20 +2,20 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-import json
 from math import hypot
-from pathlib import Path
 import random
 from typing import Protocol
 
-from poc.actions import Action
+from poc.actions import Action, ActionType
 from poc.entities import DepositPoint, DepositType, Side, SourceState
 from poc.game_state import GameState
+from poc.observations import DecisionObservation
 from poc.policy_mapping import (
     normalized_action_label,
     normalized_deposit_id,
     normalized_source_id,
 )
+from poc.rules import thermometer_lane_is_clear
 from poc.scoring import deposit_max_count_for_side, deposit_zone_points
 
 POLICY_SOURCE_ORDER = (
@@ -320,21 +320,13 @@ DEFAULT_FLAT_FEATURE_KEYS = (
 
 
 def build_rl_policy_step(
-    state: GameState,
-    side: Side,
-    ranked_actions: list[Action],
-    previous_state: PreviousStateView | None = None,
-    dt: float | None = None,
+    observation: DecisionObservation,
     config: RLObservationConfig | None = None,
     action_space: RLActionSpace = DEFAULT_ACTION_SPACE,
 ) -> RLPolicyStep:
-    observation = build_rl_observation(
-        state,
-        side,
-        previous_state=previous_state,
-        dt=dt,
-        config=config,
-    )
+    side = observation.side
+    ranked_actions = observation.ranked_actions
+    rl_observation = build_rl_observation(observation, config=config)
     action_mask = [0] * len(action_space.tokens)
     candidates: list[RLCandidate] = []
     index_by_token = action_space.index_by_token
@@ -357,41 +349,21 @@ def build_rl_policy_step(
             )
         )
     return RLPolicyStep(
-        observation=observation,
+        observation=rl_observation,
         action_space=action_space,
         action_mask=tuple(action_mask),
         candidates=tuple(candidates),
     )
 
 
-def build_rl_policy_step_from_planner(
-    state: GameState,
-    side: Side,
-    planner: "UtilityPlanner",
-    previous_state: PreviousStateView | None = None,
-    dt: float | None = None,
-    config: RLObservationConfig | None = None,
-    action_space: RLActionSpace = DEFAULT_ACTION_SPACE,
-) -> RLPolicyStep:
-    ranked_actions = planner.rank_actions(state, side)
-    return build_rl_policy_step(
-        state,
-        side,
-        ranked_actions=ranked_actions,
-        previous_state=previous_state,
-        dt=dt,
-        config=config,
-        action_space=action_space,
-    )
-
-
 def build_rl_observation(
-    state: GameState,
-    side: Side,
-    previous_state: PreviousStateView | None = None,
-    dt: float | None = None,
+    observation: DecisionObservation,
     config: RLObservationConfig | None = None,
 ) -> RLObservation:
+    state = observation.state
+    side = observation.side
+    previous_state = observation.previous_state
+    dt = observation.dt
     cfg = config or RLObservationConfig()
     our_robot = state.robot_for_side(side)
     enemy_robot = state.robot_for_side(side.opponent())
@@ -550,16 +522,16 @@ def build_rl_observation(
         "enemy_endgame_started": float(state.endgame_started_for(side.opponent())),
         "thermometer_done_for_us": float(state.thermometer.is_done_for_side(side)),
         "thermometer_done_for_enemy": float(state.thermometer.is_done_for_side(side.opponent())),
-        "thermometer_lane_clear_for_us": float(_thermometer_lane_is_clear(state, side)),
+        "thermometer_lane_clear_for_us": float(thermometer_lane_is_clear(state, side)),
         "thermometer_available_for_us": float(
             not state.thermometer.is_done_for_side(side)
             and state.t < endgame_config.main_pipeline_deadline
-            and _thermometer_lane_is_clear(state, side)
+            and thermometer_lane_is_clear(state, side)
         ),
         "thermometer_available_for_enemy": float(
             not state.thermometer.is_done_for_side(side.opponent())
             and state.t < state.endgame_config_for(side.opponent()).main_pipeline_deadline
-            and _thermometer_lane_is_clear(state, side.opponent())
+            and thermometer_lane_is_clear(state, side.opponent())
         ),
         "time_since_our_lane_clear_change_norm": _time_since_change_norm(
             state.t,
@@ -896,22 +868,6 @@ def _attack_score_diff_delta(deposit: DepositPoint, side: Side) -> float:
     return after - before
 
 
-def _thermometer_lane_is_clear(state: GameState, side: Side) -> bool:
-    blocking_source_id = state.thermometer.blocking_source_id_for_side(side)
-    source = state.sources.get(blocking_source_id)
-    blocking_source_clear = (
-        source is None
-        or source.state is SourceState.EMPTY
-        or source.available_items <= 0
-    )
-    zone_10 = state.deposits.get(10)
-    zone_10_clear = zone_10 is None or zone_10.total_items() == 0
-    blocking_deposit_id = state.thermometer.blocking_deposit_id_for_side(side)
-    blocking_deposit = state.deposits.get(blocking_deposit_id)
-    blocking_deposit_clear = blocking_deposit is None or blocking_deposit.total_items() == 0
-    return blocking_source_clear and zone_10_clear and blocking_deposit_clear
-
-
 def _flatten_features(
     global_features: dict[str, float],
     source_features: dict[str, dict[str, float]],
@@ -943,6 +899,111 @@ def resolve_policy_action(
         if normalized_action_label(action, side) == policy_action:
             return action
     return None
+
+
+def build_rl_transitions_from_match_result(
+    result,
+    *,
+    side: Side | None = None,
+    config: RLObservationConfig | None = None,
+    action_space: RLActionSpace = DEFAULT_ACTION_SPACE,
+    thermometer_reward_bonus: float = 3.0,
+    terminal_win_bonus: float = 2.0,
+    terminal_draw_bonus: float = 0.0,
+    terminal_loss_bonus: float = -2.0,
+) -> list[RLTransition]:
+    transitions: list[RLTransition] = []
+    decision_log = list(getattr(result, "decision_log", ()))
+    sides = (side,) if side is not None else (Side.BLUE, Side.YELLOW)
+    final_score_diff_by_side = _final_score_diff_by_side(result)
+    zero_mask = tuple(0 for _ in action_space.tokens)
+
+    for current_side in sides:
+        side_decisions = [entry for entry in decision_log if entry.side is current_side]
+        for index, entry in enumerate(side_decisions):
+            next_entry = side_decisions[index + 1] if index + 1 < len(side_decisions) else None
+            current_step = build_rl_policy_step(
+                entry.observation,
+                config=config,
+                action_space=action_space,
+            )
+            if next_entry is None:
+                next_step = None
+                done = True
+                score_diff_after = final_score_diff_by_side[current_side]
+                next_observation = current_step.observation
+                next_action_mask = zero_mask
+            else:
+                next_step = build_rl_policy_step(
+                    next_entry.observation,
+                    config=config,
+                    action_space=action_space,
+                )
+                done = False
+                score_diff_after = next_entry.score_diff_before
+                next_observation = next_step.observation
+                next_action_mask = next_step.action_mask
+
+            chosen_action = normalized_action_label(entry.chosen_action, current_side)
+            chosen_action_index = action_space.encode(chosen_action)
+            reward = score_diff_after - entry.score_diff_before
+            if _transition_completed_thermometer(entry, next_entry):
+                reward += thermometer_reward_bonus
+            if done:
+                reward += _terminal_bonus(
+                    score_diff_after,
+                    win_bonus=terminal_win_bonus,
+                    draw_bonus=terminal_draw_bonus,
+                    loss_bonus=terminal_loss_bonus,
+                )
+            transitions.append(
+                RLTransition(
+                    side=current_side.value,
+                    time=entry.time,
+                    chosen_action=chosen_action,
+                    chosen_action_index=chosen_action_index,
+                    action_mask=current_step.action_mask,
+                    observation=current_step.observation,
+                    reward=reward,
+                    next_observation=next_observation,
+                    next_action_mask=next_action_mask,
+                    done=done,
+                    score_diff_before=entry.score_diff_before,
+                    score_diff_after=score_diff_after,
+                )
+            )
+    return transitions
+
+
+def _final_score_diff_by_side(result) -> dict[Side, float]:
+    summary = getattr(result, "summary", {})
+    our_side = Side(getattr(result, "our_side"))
+    score_diff = float(summary.get("score_diff", 0.0))
+    return {
+        our_side: score_diff,
+        our_side.opponent(): -score_diff,
+    }
+
+
+def _transition_completed_thermometer(entry, next_entry) -> bool:
+    if entry.chosen_action.type is not ActionType.DO_THERMOMETER:
+        return False
+    next_state = next_entry.observation.state if next_entry is not None else None
+    return next_state is not None and next_state.thermometer.is_done_for_side(entry.side)
+
+
+def _terminal_bonus(
+    score_diff: float,
+    *,
+    win_bonus: float,
+    draw_bonus: float,
+    loss_bonus: float,
+) -> float:
+    if score_diff > 0.0:
+        return win_bonus
+    if score_diff < 0.0:
+        return loss_bonus
+    return draw_bonus
 
 
 def _normalize_signed(value: float, scale: float) -> float:
@@ -1007,13 +1068,3 @@ def transition_to_record(transition: RLTransition) -> dict[str, object]:
         "score_diff_before": transition.score_diff_before,
         "score_diff_after": transition.score_diff_after,
     }
-
-
-def save_transition_dataset(transitions: list[RLTransition], path: str | Path) -> Path:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8") as handle:
-        for transition in transitions:
-            handle.write(json.dumps(transition_to_record(transition), ensure_ascii=True))
-            handle.write("\n")
-    return output
