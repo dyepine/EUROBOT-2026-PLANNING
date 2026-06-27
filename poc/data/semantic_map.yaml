@@ -1,0 +1,285 @@
+semantic_map:
+  name: default_semantic_field
+  field_size: [3.0, 2.0]
+
+  sources:
+    - semantic_id: 11
+      label: blue_source_upper
+      position: [1.325, 0.2]
+      map_obstacle_id: "11"
+      collect_routes:
+        - name: collect_11
+          waypoints:
+            - [1.0, 0.2]
+            - [1.06, 0.2]
+
+    - semantic_id: 12
+      label: blue_source_lower
+      position: [1.325, -0.6]
+      map_obstacle_id: "12"
+      collect_routes:
+        - name: collect_12
+          waypoints:
+            - [0.99, -0.6]
+            - [1.06, -0.6]
+
+    - semantic_id: 13
+      label: blue_source_mid_lower
+      position: [0.4, -0.825]
+      map_obstacle_id: "13"
+      collect_routes:
+        - name: collect_13
+          waypoints:
+            - [0.4, -0.5]
+            - [0.4, -0.56]
+
+    - semantic_id: 14
+      label: blue_source_mid_upper
+      position: [0.35, -0.2]
+      map_obstacle_id: "14"
+      collect_routes:
+        - name: collect_14
+          waypoints:
+            - [0.35, 0.15]
+            - [0.35, 0.06]
+        - name: collect_14_back
+          waypoints:
+            - [0.35, -0.55]
+            - [0.35, -0.46]
+
+    - semantic_id: 21
+      label: yellow_source_upper
+      position: [-1.325, 0.2]
+      map_obstacle_id: "21"
+      collect_routes:
+        - name: collect_11_mirror
+          waypoints:
+            - [-1.0, 0.2]
+            - [-1.06, 0.2]
+
+    - semantic_id: 22
+      label: yellow_source_lower
+      position: [-1.325, -0.6]
+      map_obstacle_id: "22"
+      collect_routes:
+        - name: collect_12_mirror
+          waypoints:
+            - [-0.99, -0.6]
+            - [-1.06, -0.6]
+
+    - semantic_id: 23
+      label: yellow_source_mid_lower
+      position: [-0.4, -0.825]
+      map_obstacle_id: "23"
+      collect_routes:
+        - name: collect_13_mirror
+          waypoints:
+            - [-0.4, -0.5]
+            - [-0.4, -0.56]
+
+    - semantic_id: 24
+      label: yellow_source_mid_upper
+      position: [-0.35, -0.2]
+      map_obstacle_id: "24"
+      collect_routes:
+        - name: collect_14_mirror
+          waypoints:
+            - [-0.35, 0.15]
+            - [-0.35, 0.06]
+        - name: collect_14_back_mirror
+          waypoints:
+            - [-0.35, -0.55]
+            - [-0.35, -0.46]
+          blocked_by_sources: [23]
+
+  deposits:
+    - semantic_id: 1
+      label: center_storage_upper
+      position: [0.0, -0.2]
+      kind: storage
+      map_obstacle_id: "00"
+      approach_ring_radius: 0.24
+
+    - semantic_id: 10
+      label: center_storage_lower
+      position: [0.0, -0.9]
+      kind: storage
+      map_obstacle_id: "10"
+      deposit_routes:
+        - name: drop_10
+          waypoints:
+            - [0.0, -0.65]
+      attack_routes_by_side:
+        blue:
+          - name: attack_10_from_right
+            waypoints:
+              - [0.24, -0.9]
+              - [0.0, -0.9]
+            blocked_by_sources: [13]
+            axis: x
+        yellow:
+          - name: attack_10_from_left
+            waypoints:
+              - [-0.24, -0.9]
+              - [0.0, -0.9]
+            blocked_by_sources: [23]
+            axis: x
+
+    - semantic_id: 15
+      label: right_corner_storage
+      position: [1.4, -0.2]
+      kind: storage
+      map_obstacle_id: "15"
+      protected_for: blue
+      deposit_routes:
+        - name: drop_15
+          waypoints:
+            - [1.13, -0.2]
+      attack_routes_by_side:
+        blue:
+          - name: attack_15_from_top
+            waypoints:
+              - [1.4, 0.0]
+              - [1.4, -0.2]
+            axis: y
+          - name: attack_15_from_bottom
+            waypoints:
+              - [1.4, -0.4]
+              - [1.4, -0.2]
+            axis: y
+        yellow:
+          - name: attack_15_from_top
+            waypoints:
+              - [1.4, 0.0]
+              - [1.4, -0.2]
+            axis: y
+          - name: attack_15_from_bottom
+            waypoints:
+              - [1.4, -0.4]
+              - [1.4, -0.2]
+            axis: y
+
+    - semantic_id: 16
+      label: blue_storage_lower
+      position: [0.8, -0.9]
+      kind: storage
+      owner: blue
+      map_obstacle_id: "16"
+      protected_for: blue
+      deposit_routes:
+        - name: drop_16
+          waypoints:
+            - [0.8, -0.65]
+
+    - semantic_id: 17
+      label: right_upper_storage
+      position: [0.7, -0.2]
+      kind: storage
+      map_obstacle_id: "17"
+      approach_ring_radius: 0.24
+
+    - semantic_id: 25
+      label: left_corner_storage
+      position: [-1.4, -0.2]
+      kind: storage
+      map_obstacle_id: "25"
+      protected_for: yellow
+      deposit_routes:
+        - name: drop_25
+          waypoints:
+            - [-1.13, -0.2]
+      attack_routes_by_side:
+        blue:
+          - name: attack_15_from_top_mirror
+            waypoints:
+              - [-1.4, 0.0]
+              - [-1.4, -0.2]
+            axis: y
+          - name: attack_15_from_bottom_mirror
+            waypoints:
+              - [-1.4, -0.4]
+              - [-1.4, -0.2]
+            axis: y
+        yellow:
+          - name: attack_15_from_top_mirror
+            waypoints:
+              - [-1.4, 0.0]
+              - [-1.4, -0.2]
+            axis: y
+          - name: attack_15_from_bottom_mirror
+            waypoints:
+              - [-1.4, -0.4]
+              - [-1.4, -0.2]
+            axis: y
+
+    - semantic_id: 26
+      label: yellow_storage_lower
+      position: [-0.8, -0.9]
+      kind: storage
+      owner: yellow
+      map_obstacle_id: "26"
+      protected_for: yellow
+      deposit_routes:
+        - name: drop_26
+          waypoints:
+            - [-0.8, -0.65]
+
+    - semantic_id: 27
+      label: left_upper_storage
+      position: [-0.7, -0.2]
+      kind: storage
+      map_obstacle_id: "27"
+      approach_ring_radius: 0.24
+
+    - semantic_id: 101
+      label: blue_home
+      position: [1.12, 0.75]
+      kind: home
+      owner: blue
+      protected_for: blue
+      deposit_routes:
+        - name: drop_blue_home
+          waypoints:
+            - [1.12, 0.75]
+
+    - semantic_id: 201
+      label: yellow_home
+      position: [-1.12, 0.75]
+      kind: home
+      owner: yellow
+      protected_for: yellow
+      deposit_routes:
+        - name: drop_yellow_home
+          waypoints:
+            - [-1.12, 0.75]
+
+  thermometer:
+    semantic_id: 900
+    label: thermometer
+    position: [0.0, -1.0]
+    approach_point: [0.0, -0.77]
+    reward: 10
+    blue_route:
+      - [0.0, -0.7]
+      - [0.0, -0.77]
+      - [0.63, -0.77]
+      - [0.63, -0.65]
+    yellow_route:
+      - [0.0, -0.7]
+      - [0.0, -0.77]
+      - [-0.63, -0.77]
+      - [-0.63, -0.65]
+    blue_blocking_source_id: 13
+    yellow_blocking_source_id: 23
+    blue_blocking_deposit_id: 16
+    yellow_blocking_deposit_id: 26
+
+action_mask_heuristics:
+  check_semantic_waypoints: true
+  check_attack_enemy_block: true
+  require_clear_thermometer_lane: true
+  allow_blocked_final_waypoint_for:
+    - attack_deposit
+    - start_endgame
+  check_attack_final_waypoint: true
+  check_attack_final_segment: true
